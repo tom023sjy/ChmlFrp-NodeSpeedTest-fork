@@ -57,6 +57,9 @@ struct TunnelInfo {
     /// API 返回的隧道状态字段，可能是 state / tunnelState / tunnel_state，值为字符串 "true"/"false"
     #[serde(default, alias = "state", alias = "tunnel_state", deserialize_with = "deserialize_tunnel_state")]
     tunnelState: Option<bool>,
+    /// 隧道远程端口，tcping 检测时使用
+    #[serde(default, alias = "remotePort")]
+    remote_port: u32,
 }
 
 /// 调度器全局句柄（用于启动/停止）
@@ -170,9 +173,13 @@ async fn check_single_task(
         return Ok(());
     }
 
-    // 判定主隧道状态
+    // 判定主隧道状态（按任务配置的检测方式）
     let primary = find_tunnel(tunnels, &task.primary_tunnel.tunnel_name);
-    let primary_ok = primary.map(|t| is_tunnel_healthy(t)).unwrap_or(false);
+    let primary_ok = if let Some(t) = primary {
+        is_tunnel_healthy(t, &task.check_methods, task.fail_method_threshold, task.tcping_timeout_secs).await
+    } else {
+        false
+    };
 
     // 隧道列表为空（token 无效或 API 故障），跳过本轮，不累计失败
     if tunnels.is_empty() && primary.is_none() {
@@ -199,22 +206,18 @@ async fn check_single_task(
         primary.map(|t| t.tunnelState).flatten(),
         primary_ok
     );
-    for b in &task.backup_tunnels {
-        let found = find_tunnel(tunnels, &b.tunnel_name);
-        log::info!(
-            "[DNS-Monitor] 备用隧道「{}」: 匹配={} tunnelState={:?} 健康={}",
-            b.tunnel_name,
-            found.is_some(),
-            found.map(|t| t.tunnelState).flatten(),
-            found.map(|t| is_tunnel_healthy(t)).unwrap_or(false)
-        );
-    }
 
     if !rt.failed_over {
         // 当前为主隧道
 
         // 始终检查备用隧道状态，提前预警
-        let backup_healthy = count_healthy_backups(tunnels, &task.backup_tunnels);
+        let backup_healthy = count_healthy_backups(
+            tunnels,
+            &task.backup_tunnels,
+            &task.check_methods,
+            task.fail_method_threshold,
+            task.tcping_timeout_secs,
+        ).await;
         let backup_total = task.backup_tunnels.len();
         let backup_note = if backup_total > 0 {
             format!("，备用 {}/{} 可用", backup_healthy, backup_total)
@@ -248,12 +251,18 @@ async fn check_single_task(
                 for b in &task.backup_tunnels {
                     let found = find_tunnel(tunnels, &b.tunnel_name);
                     if let Some(t) = found {
+                        let backup_ok = is_tunnel_healthy(
+                            t,
+                            &task.check_methods,
+                            task.fail_method_threshold,
+                            task.tcping_timeout_secs,
+                        ).await;
                         log::info!(
                             "[DNS-Monitor] 备用「{}」: 已匹配, tunnelState={:?}, nodestate={}, 健康={}",
                             b.tunnel_name,
                             t.tunnelState,
                             t.nodestate,
-                            is_tunnel_healthy(t)
+                            backup_ok
                         );
                     } else {
                         log::warn!(
@@ -262,7 +271,13 @@ async fn check_single_task(
                         );
                     }
                 }
-                if let Some(backup) = pick_backup_tunnel(tunnels, &task.backup_tunnels) {
+                if let Some(backup) = pick_backup_tunnel(
+                    tunnels,
+                    &task.backup_tunnels,
+                    &task.check_methods,
+                    task.fail_method_threshold,
+                    task.tcping_timeout_secs,
+                ).await {
                     log::info!("[DNS-Monitor] pick_backup_tunnel 选中: {}", backup.tunnel_name);
                     let cname_value = backup.cname_value.clone();
                     let to_name = backup.tunnel_name.clone();
@@ -378,33 +393,106 @@ fn find_tunnel<'a>(tunnels: &'a [TunnelInfo], name: &str) -> Option<&'a TunnelIn
     tunnels.iter().find(|t| t.name == name)
 }
 
-/// 健康判定：tunnelState 不为 false 且 nodestate 非 "offline"
-fn is_tunnel_healthy(t: &TunnelInfo) -> bool {
-    let ts_unhealthy = t.tunnelState == Some(false);
-    let node_offline = t.nodestate.eq_ignore_ascii_case("offline");
-    let healthy = !ts_unhealthy && !node_offline;
+/// 健康判定：根据任务配置的检测方式判定隧道是否健康
+/// 统计不通过的检测方式数量，若 >= fail_method_threshold 则视为不健康
+async fn is_tunnel_healthy(
+    t: &TunnelInfo,
+    check_methods: &[String],
+    fail_method_threshold: u32,
+    tcping_timeout_secs: u32,
+) -> bool {
+    let methods = if check_methods.is_empty() {
+        // 兼容旧任务：未配置检测方式时默认使用隧道状态 + 节点状态
+        &["tunnel_state".to_string(), "node_state".to_string()]
+    } else {
+        check_methods
+    };
+    let threshold = if fail_method_threshold == 0 {
+        1
+    } else {
+        fail_method_threshold
+    };
+
+    let mut fail_count = 0u32;
+    let mut details: Vec<String> = Vec::new();
+
+    for m in methods {
+        let (passed, detail) = match m.as_str() {
+            "tunnel_state" => {
+                let ok = t.tunnelState != Some(false);
+                (ok, format!("tunnelState={:?}→{}", t.tunnelState, if ok { "通过" } else { "不通过" }))
+            }
+            "node_state" => {
+                let ok = !t.nodestate.eq_ignore_ascii_case("offline");
+                (ok, format!("nodestate={}→{}", t.nodestate, if ok { "通过" } else { "不通过" }))
+            }
+            "tcping" => {
+                let target = format!("{}:{}", t.ip, t.remote_port);
+                if t.ip.is_empty() || t.remote_port == 0 {
+                    (false, format!("tcping {}→不通过（地址无效）", target))
+                } else {
+                    let timeout = std::time::Duration::from_secs(tcping_timeout_secs.max(1).min(10) as u64);
+                    let result = tokio::time::timeout(
+                        timeout,
+                        tokio::net::TcpStream::connect(&target),
+                    ).await;
+                    let ok = matches!(result, Ok(Ok(_)));
+                    (ok, format!("tcping {}→{}", target, if ok { "通过" } else { "不通过" }))
+                }
+            }
+            _ => (true, format!("未知检测方式{}→跳过", m)),
+        };
+        if !passed {
+            fail_count += 1;
+        }
+        details.push(detail);
+    }
+
+    let healthy = fail_count < threshold;
     if !healthy {
         log::info!(
-            "[DNS-Monitor] 隧道「{}」不健康: tunnelState={:?}, nodestate={}",
-            t.name, t.tunnelState, t.nodestate
+            "[DNS-Monitor] 隧道「{}」不健康: 不通过 {}/{}，详情: {}",
+            t.name, fail_count, methods.len(), details.join("，")
         );
     }
     healthy
 }
 
 /// 从备用隧道列表中选取第一个健康的隧道
-fn pick_backup_tunnel<'a>(tunnels: &'a [TunnelInfo], backups: &'a [TunnelTarget]) -> Option<&'a TunnelTarget> {
-    backups.iter().find(|b| {
-        find_tunnel(tunnels, &b.tunnel_name).map(is_tunnel_healthy).unwrap_or(false)
-    })
+async fn pick_backup_tunnel<'a>(
+    tunnels: &'a [TunnelInfo],
+    backups: &'a [TunnelTarget],
+    check_methods: &[String],
+    fail_method_threshold: u32,
+    tcping_timeout_secs: u32,
+) -> Option<&'a TunnelTarget> {
+    for b in backups {
+        if let Some(t) = find_tunnel(tunnels, &b.tunnel_name) {
+            if is_tunnel_healthy(t, check_methods, fail_method_threshold, tcping_timeout_secs).await {
+                return Some(b);
+            }
+        }
+    }
+    None
 }
 
 /// 统计备用隧道中健康可用的数量
-fn count_healthy_backups(tunnels: &[TunnelInfo], backups: &[TunnelTarget]) -> usize {
-    backups
-        .iter()
-        .filter(|b| find_tunnel(tunnels, &b.tunnel_name).map(is_tunnel_healthy).unwrap_or(false))
-        .count()
+async fn count_healthy_backups(
+    tunnels: &[TunnelInfo],
+    backups: &[TunnelTarget],
+    check_methods: &[String],
+    fail_method_threshold: u32,
+    tcping_timeout_secs: u32,
+) -> usize {
+    let mut count = 0;
+    for b in backups {
+        if let Some(t) = find_tunnel(tunnels, &b.tunnel_name) {
+            if is_tunnel_healthy(t, check_methods, fail_method_threshold, tcping_timeout_secs).await {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 async fn do_switch(
@@ -414,8 +502,8 @@ async fn do_switch(
     to_tunnel: &str,
     cname_value: &str,
 ) -> Result<(), String> {
-    // 取凭证
-    let credential = find_credential(app_handle, &task.credential_id)?;
+    // 取凭证（带 owner 校验，防止跨账号引用凭证）
+    let credential = find_credential(app_handle, &task.credential_id, &task.owner_username)?;
     // 调用 DNS 服务商接口切换 CNAME
     dns_provider::upsert_cname(&credential, &task.domain, &task.subdomain, cname_value).await?;
     log::info!(
@@ -425,10 +513,19 @@ async fn do_switch(
     Ok(())
 }
 
-fn find_credential(app_handle: &tauri::AppHandle, id: &str) -> Result<DnsCredential, String> {
+fn find_credential(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    owner_username: &str,
+) -> Result<DnsCredential, String> {
     let path = dns_config_path(app_handle, "dns-credentials.json")?;
     let list: Vec<DnsCredential> = read_json(&path, Vec::new());
-    list.into_iter().find(|c| c.id == id).ok_or_else(|| format!("未找到凭证: {}", id))
+    list.into_iter()
+        .find(|c| {
+            c.id == id
+                && (c.owner_username.is_empty() || c.owner_username == owner_username)
+        })
+        .ok_or_else(|| format!("未找到凭证: {}", id))
 }
 
 fn get_runtime(app_handle: &tauri::AppHandle, task_id: &str, primary: &TunnelTarget) -> TaskRuntime {
@@ -474,6 +571,8 @@ fn write_log(
         success,
         message: message.to_string(),
         time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        // 日志继承任务的 owner_username，便于按账号隔离展示
+        owner_username: task.owner_username.clone(),
     };
     dns_config::append_log(app_handle, log);
 }

@@ -51,6 +51,21 @@ pub struct DnsMonitorTask {
     /// 轮询间隔（秒），默认 60，范围 10-3600
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u32,
+    /// 启用的检测方式列表，可选值："tunnel_state" / "node_state" / "tcping"
+    /// 旧任务无此字段时默认 ["tunnel_state", "node_state"]
+    #[serde(default = "default_check_methods")]
+    pub check_methods: Vec<String>,
+    /// 多少种检测方式不通过时判定主隧道异常（1 到 check_methods.len()）
+    /// 旧任务无此字段时默认 1
+    #[serde(default = "default_fail_method_threshold")]
+    pub fail_method_threshold: u32,
+    /// tcping 检测超时时间（秒），范围 1-10
+    /// 旧任务无此字段时默认 3
+    #[serde(default = "default_tcping_timeout")]
+    pub tcping_timeout_secs: u32,
+    /// 任务所属用户名（账号隔离用，旧数据为空时视为所有用户可见）
+    #[serde(default)]
+    pub owner_username: String,
 }
 
 fn default_fail_threshold() -> u32 {
@@ -63,6 +78,18 @@ fn default_recover_threshold() -> u32 {
 
 fn default_poll_interval() -> u32 {
     60
+}
+
+fn default_check_methods() -> Vec<String> {
+    vec!["tunnel_state".to_string(), "node_state".to_string()]
+}
+
+fn default_fail_method_threshold() -> u32 {
+    1
+}
+
+fn default_tcping_timeout() -> u32 {
+    3
 }
 
 /// 任务运行时状态（仅内存）
@@ -101,6 +128,9 @@ pub struct DnsSwitchLog {
     pub success: bool,
     pub message: String,
     pub time: String,
+    /// 日志所属用户名（账号隔离用，旧数据为空时视为所有用户可见）
+    #[serde(default)]
+    pub owner_username: String,
 }
 
 const CREDENTIALS_FILE: &str = "dns-credentials.json";
@@ -129,20 +159,37 @@ fn write_json<T: Serialize>(path: &PathBuf, data: &T) -> Result<(), String> {
 // ===== 凭证管理命令 =====
 
 #[tauri::command]
-pub async fn list_dns_credentials(app_handle: tauri::AppHandle) -> Result<Vec<DnsCredential>, String> {
+pub async fn list_dns_credentials(
+    app_handle: tauri::AppHandle,
+    username: String,
+) -> Result<Vec<DnsCredential>, String> {
     let path = dns_data_dir(&app_handle)?.join(CREDENTIALS_FILE);
-    Ok(read_json(&path, Vec::new()))
+    let list: Vec<DnsCredential> = read_json(&path, Vec::new());
+    // 账号隔离：owner_username 为空（旧数据）或等于当前用户的凭证可见
+    Ok(list
+        .into_iter()
+        .filter(|c| c.owner_username.is_empty() || c.owner_username == username)
+        .collect())
 }
 
 #[tauri::command]
 pub async fn save_dns_credential(
     app_handle: tauri::AppHandle,
+    username: String,
     credential: DnsCredential,
 ) -> Result<DnsCredential, String> {
     let path = dns_data_dir(&app_handle)?.join(CREDENTIALS_FILE);
     let mut list: Vec<DnsCredential> = read_json(&path, Vec::new());
 
+    // 强制设置 owner 为当前用户
+    let mut credential = credential;
+    credential.owner_username = username.clone();
+
     if let Some(idx) = list.iter().position(|c| c.id == credential.id) {
+        // 验证 owner：只能修改自己的凭证（旧数据 owner 为空时允许认领）
+        if !list[idx].owner_username.is_empty() && list[idx].owner_username != username {
+            return Err("无权修改此凭证".to_string());
+        }
         list[idx] = credential.clone();
     } else {
         list.push(credential.clone());
@@ -154,10 +201,17 @@ pub async fn save_dns_credential(
 #[tauri::command]
 pub async fn delete_dns_credential(
     app_handle: tauri::AppHandle,
+    username: String,
     id: String,
 ) -> Result<(), String> {
     let path = dns_data_dir(&app_handle)?.join(CREDENTIALS_FILE);
     let mut list: Vec<DnsCredential> = read_json(&path, Vec::new());
+    // 验证 owner：只能删除自己的凭证（旧数据 owner 为空时允许删除）
+    if let Some(c) = list.iter().find(|c| c.id == id) {
+        if !c.owner_username.is_empty() && c.owner_username != username {
+            return Err("无权删除此凭证".to_string());
+        }
+    }
     list.retain(|c| c.id != id);
     write_json(&path, &list)
 }
@@ -165,19 +219,36 @@ pub async fn delete_dns_credential(
 // ===== 任务管理命令 =====
 
 #[tauri::command]
-pub async fn list_dns_tasks(app_handle: tauri::AppHandle) -> Result<Vec<DnsMonitorTask>, String> {
+pub async fn list_dns_tasks(
+    app_handle: tauri::AppHandle,
+    username: String,
+) -> Result<Vec<DnsMonitorTask>, String> {
     let path = dns_data_dir(&app_handle)?.join(TASKS_FILE);
-    Ok(read_json(&path, Vec::new()))
+    let list: Vec<DnsMonitorTask> = read_json(&path, Vec::new());
+    // 账号隔离：owner_username 为空（旧数据）或等于当前用户的任务可见
+    Ok(list
+        .into_iter()
+        .filter(|t| t.owner_username.is_empty() || t.owner_username == username)
+        .collect())
 }
 
 #[tauri::command]
 pub async fn save_dns_task(
     app_handle: tauri::AppHandle,
+    username: String,
     task: DnsMonitorTask,
 ) -> Result<DnsMonitorTask, String> {
     let path = dns_data_dir(&app_handle)?.join(TASKS_FILE);
     let mut list: Vec<DnsMonitorTask> = read_json(&path, Vec::new());
+    // 强制设置 owner 为当前用户
+    let mut task = task;
+    task.owner_username = username.clone();
+
     if let Some(idx) = list.iter().position(|t| t.id == task.id) {
+        // 验证 owner：只能修改自己的任务（旧数据 owner 为空时允许认领）
+        if !list[idx].owner_username.is_empty() && list[idx].owner_username != username {
+            return Err("无权修改此任务".to_string());
+        }
         list[idx] = task.clone();
     } else {
         list.push(task.clone());
@@ -189,10 +260,17 @@ pub async fn save_dns_task(
 #[tauri::command]
 pub async fn delete_dns_task(
     app_handle: tauri::AppHandle,
+    username: String,
     id: String,
 ) -> Result<(), String> {
     let path = dns_data_dir(&app_handle)?.join(TASKS_FILE);
     let mut list: Vec<DnsMonitorTask> = read_json(&path, Vec::new());
+    // 验证 owner：只能删除自己的任务（旧数据 owner 为空时允许删除）
+    if let Some(t) = list.iter().find(|t| t.id == id) {
+        if !t.owner_username.is_empty() && t.owner_username != username {
+            return Err("无权删除此任务".to_string());
+        }
+    }
     list.retain(|t| t.id != id);
     write_json(&path, &list)
 }
@@ -200,9 +278,14 @@ pub async fn delete_dns_task(
 // ===== 日志管理命令 =====
 
 #[tauri::command]
-pub async fn list_dns_logs(app_handle: tauri::AppHandle) -> Result<Vec<DnsSwitchLog>, String> {
+pub async fn list_dns_logs(
+    app_handle: tauri::AppHandle,
+    username: String,
+) -> Result<Vec<DnsSwitchLog>, String> {
     let path = dns_data_dir(&app_handle)?.join(LOGS_FILE);
     let mut logs: Vec<DnsSwitchLog> = read_json(&path, Vec::new());
+    // 账号隔离：只返回当前用户的日志（旧数据 owner 为空时也可见）
+    logs.retain(|l| l.owner_username.is_empty() || l.owner_username == username);
     // 按时间倒序
     logs.sort_by(|a, b| b.time.cmp(&a.time));
     // 最多保留 500 条
@@ -213,9 +296,15 @@ pub async fn list_dns_logs(app_handle: tauri::AppHandle) -> Result<Vec<DnsSwitch
 }
 
 #[tauri::command]
-pub async fn clear_dns_logs(app_handle: tauri::AppHandle) -> Result<(), String> {
+pub async fn clear_dns_logs(
+    app_handle: tauri::AppHandle,
+    username: String,
+) -> Result<(), String> {
     let path = dns_data_dir(&app_handle)?.join(LOGS_FILE);
-    write_json(&path, &Vec::<DnsSwitchLog>::new())
+    // 仅清空当前用户的日志，保留其他用户的日志
+    let mut logs: Vec<DnsSwitchLog> = read_json(&path, Vec::new());
+    logs.retain(|l| !l.owner_username.is_empty() && l.owner_username != username);
+    write_json(&path, &logs)
 }
 
 /// 内部接口：追加一条日志（不导出为 Tauri 命令）
@@ -273,6 +362,7 @@ pub async fn set_user_token(
 #[tauri::command]
 pub async fn list_dns_runtime(
     app_handle: tauri::AppHandle,
+    username: String,
     state: tauri::State<'_, DnsRuntimeState>,
 ) -> Result<std::collections::HashMap<String, TaskRuntime>, String> {
     let tasks: Vec<DnsMonitorTask> = {
@@ -282,6 +372,10 @@ pub async fn list_dns_runtime(
     let guard = state.0.lock().map_err(|e| format!("获取运行时锁失败: {}", e))?;
     let mut result = std::collections::HashMap::new();
     for task in tasks {
+        // 账号隔离：只返回当前用户的 task runtime
+        if !task.owner_username.is_empty() && task.owner_username != username {
+            continue;
+        }
         let rt = guard
             .get(&task.id)
             .cloned()

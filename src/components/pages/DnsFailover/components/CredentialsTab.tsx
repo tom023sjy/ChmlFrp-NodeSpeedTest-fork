@@ -13,6 +13,7 @@ import {
 import { Plus, Pencil, Trash2, KeyRound, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { type StoredUser } from "@/services/api";
 import {
   dnsFailoverService,
   type DnsCredential,
@@ -24,6 +25,7 @@ const PROVIDERS: { value: DnsProviderKind; label: string }[] = [
   { value: "dnspodCn", label: "DNSPod.cn（腾讯云 API 3.0）" },
   { value: "dnspodCom", label: "DNSPod.com（国际 Token）" },
   { value: "aliyun", label: "Aliyun（阿里云）" },
+  { value: "cloudflare", label: "Cloudflare（API Token）" },
 ];
 
 // 各服务商获取密钥的地址与简短说明
@@ -46,6 +48,11 @@ const PROVIDER_GUIDE: Record<
     urlLabel: "ram.console.aliyun.com",
     tip: "在 RAM 访问控制中创建 AccessKey，获得 AccessKeyId 与 AccessKeySecret",
   },
+  cloudflare: {
+    url: "https://dash.cloudflare.com/profile/api-tokens",
+    urlLabel: "dash.cloudflare.com",
+    tip: "在「API Tokens」中创建 Token，需授予 Zone.DNS 编辑权限（Edit zone DNS）",
+  },
 };
 
 const EMPTY: DnsCredential = {
@@ -55,24 +62,34 @@ const EMPTY: DnsCredential = {
   secretId: "",
   secretKey: "",
   token: "",
+  apiToken: "",
 };
 
-export function CredentialsTab() {
+interface CredentialsTabProps {
+  user?: StoredUser | null;
+}
+
+export function CredentialsTab({ user }: CredentialsTabProps) {
   const [list, setList] = useState<DnsCredential[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<DnsCredential | null>(null);
   const effectType = useEffectType();
 
   const load = useCallback(async () => {
+    if (!user?.username) {
+      setLoading(false);
+      setList([]);
+      return;
+    }
     setLoading(true);
     try {
-      setList(await dnsFailoverService.listCredentials());
+      setList(await dnsFailoverService.listCredentials(user.username));
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "加载凭证失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.username]);
 
   useEffect(() => {
     load();
@@ -88,6 +105,10 @@ export function CredentialsTab() {
 
   const handleSave = async () => {
     if (!editing) return;
+    if (!user?.username) {
+      toast.error("未登录");
+      return;
+    }
     if (!editing.name.trim()) {
       toast.error("请输入凭证名称");
       return;
@@ -103,8 +124,12 @@ export function CredentialsTab() {
       toast.error("请填写 SecretId/AccessKeyId 与 SecretKey/AccessKeySecret");
       return;
     }
+    if (editing.provider === "cloudflare" && !editing.apiToken?.trim()) {
+      toast.error("Cloudflare 需要填写 API Token");
+      return;
+    }
     try {
-      await dnsFailoverService.saveCredential(editing);
+      await dnsFailoverService.saveCredential(user.username, editing);
       toast.success("凭证已保存");
       setEditing(null);
       load();
@@ -114,9 +139,13 @@ export function CredentialsTab() {
   };
 
   const handleDelete = async (cred: DnsCredential) => {
+    if (!user?.username) {
+      toast.error("未登录");
+      return;
+    }
     if (!confirm(`确认删除凭证「${cred.name}」？`)) return;
     try {
-      await dnsFailoverService.deleteCredential(cred.id);
+      await dnsFailoverService.deleteCredential(user.username, cred.id);
       toast.success("已删除");
       load();
     } catch (e) {
@@ -128,6 +157,9 @@ export function CredentialsTab() {
     return <div className="text-sm text-muted-foreground">加载中...</div>;
   }
 
+  // 登录状态：未登录时禁止新增/编辑凭证
+  const isLoggedIn = !!user?.username;
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -137,13 +169,26 @@ export function CredentialsTab() {
             用于切换 CNAME 记录时调用对应的域名 API
           </p>
         </div>
-        <Button size="sm" onClick={handleAdd} className="gap-1.5">
+        <Button
+          size="sm"
+          onClick={handleAdd}
+          disabled={!isLoggedIn}
+          className="gap-1.5"
+          title={!isLoggedIn ? "请先登录" : undefined}
+        >
           <Plus className="w-3.5 h-3.5" />
           新增凭证
         </Button>
       </div>
 
-      {list.length === 0 ? (
+      {!isLoggedIn ? (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <div className="w-12 h-12 rounded-2xl bg-muted/40 flex items-center justify-center mb-3">
+            <KeyRound className="w-6 h-6 text-muted-foreground" />
+          </div>
+          <p className="text-sm text-muted-foreground">请先登录账户后查看和管理 DNS 凭证</p>
+        </div>
+      ) : list.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <div className="w-12 h-12 rounded-2xl bg-muted/40 flex items-center justify-center mb-3">
             <KeyRound className="w-6 h-6 text-muted-foreground" />
@@ -169,6 +214,8 @@ export function CredentialsTab() {
                 <div className="text-xs text-muted-foreground mt-0.5 truncate">
                   {cred.provider === "dnspodCom"
                     ? `Token: ${cred.token ? "***" : "未设置"}`
+                    : cred.provider === "cloudflare"
+                    ? `API Token: ${cred.apiToken ? "***" : "未设置"}`
                     : `ID: ${cred.secretId || "未设置"}`}
                 </div>
               </div>
@@ -261,6 +308,18 @@ export function CredentialsTab() {
                       setEditing({ ...editing, token: e.target.value })
                     }
                     placeholder="12345,abcdef"
+                  />
+                </div>
+              ) : editing.provider === "cloudflare" ? (
+                <div className="space-y-1.5">
+                  <Label>API Token</Label>
+                  <Input
+                    type="password"
+                    value={editing.apiToken || ""}
+                    onChange={(e) =>
+                      setEditing({ ...editing, apiToken: e.target.value })
+                    }
+                    placeholder="••••••••••••••••"
                   />
                 </div>
               ) : (

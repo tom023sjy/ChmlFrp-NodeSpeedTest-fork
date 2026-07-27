@@ -63,8 +63,8 @@ export function DnsFailover({ user }: DnsFailoverProps) {
       <div className="flex-1 min-h-0 overflow-y-auto visible-scrollbar">
         <div className="p-6">
           {activeTab === "tasks" && <TasksTab user={user} />}
-          {activeTab === "credentials" && <CredentialsTab />}
-          {activeTab === "logs" && <LogsTab />}
+          {activeTab === "credentials" && <CredentialsTab user={user} />}
+          {activeTab === "logs" && <LogsTab user={user} />}
         </div>
       </div>
     </div>

@@ -73,9 +73,33 @@ const userTypeOptions = [
 ];
 
 export function NodeTest({ user, onTestingChange }: NodeTestProps) {
+  // 按账号隔离的本地缓存 key
+  // 旧数据（无后缀）首次访问时自动迁移到当前账号名下
+  const username = user?.username;
+  const cacheKey = useCallback((suffix: string) => {
+    if (!username) return suffix;
+    return `${suffix}__${username}`;
+  }, [username]);
+  // 一次性迁移旧 key 数据到当前账号
+  const migrateLegacyCache = useCallback((suffix: string) => {
+    if (!username) return;
+    const newKey = cacheKey(suffix);
+    if (localStorage.getItem(newKey)) return;
+    const legacy = localStorage.getItem(suffix);
+    if (!legacy) return;
+    try {
+      JSON.parse(legacy);
+      localStorage.setItem(newKey, legacy);
+      localStorage.removeItem(suffix);
+    } catch {
+      // 旧数据格式错误，跳过
+    }
+  }, [username, cacheKey]);
+
   // 初始化时尝试从缓存加载节点列表，避免切换页面回来时短暂空白
   const [nodes, setNodes] = useState<NodeWithTest[]>(() => {
     try {
+      // 初始化阶段 user 可能还未加载，先用旧 key（无后缀）兜底
       const cachedNodes = localStorage.getItem("node_list_cache");
       const savedResults = localStorage.getItem("node_test_results");
       if (cachedNodes && savedResults) {
@@ -156,11 +180,13 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
         error: n.error,
         lastTested: n.lastTested,
       }));
-    localStorage.setItem("node_test_results", JSON.stringify(results));
-  }, []);
+    migrateLegacyCache("node_test_results");
+    localStorage.setItem(cacheKey("node_test_results"), JSON.stringify(results));
+  }, [cacheKey, migrateLegacyCache]);
 
   const loadTestResults = useCallback((): SavedTestResult[] => {
-    const saved = localStorage.getItem("node_test_results");
+    migrateLegacyCache("node_test_results");
+    const saved = localStorage.getItem(cacheKey("node_test_results"));
     if (saved) {
       try {
         return JSON.parse(saved);
@@ -169,7 +195,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
       }
     }
     return [];
-  }, []);
+  }, [cacheKey, migrateLegacyCache]);
 
   useEffect(() => {
     const handleEffectTypeChange = () => {
@@ -215,12 +241,14 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
 
       setNodes(nodesWithResults);
       // 缓存节点列表，用于 API 请求失败时恢复
-      localStorage.setItem("node_list_cache", JSON.stringify(fetchedNodes));
+      migrateLegacyCache("node_list_cache");
+      localStorage.setItem(cacheKey("node_list_cache"), JSON.stringify(fetchedNodes));
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "获取节点列表失败";
       // API 请求失败时，尝试从缓存恢复节点列表和测试结果
-      const cachedNodes = localStorage.getItem("node_list_cache");
+      migrateLegacyCache("node_list_cache");
+      const cachedNodes = localStorage.getItem(cacheKey("node_list_cache"));
       if (cachedNodes) {
         try {
           const parsedNodes = JSON.parse(cachedNodes) as Node[];
@@ -253,11 +281,12 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
     } finally {
       setLoading(false);
     }
-  }, [user, loadTestResults]);
+  }, [user, loadTestResults, cacheKey, migrateLegacyCache]);
 
   const loadHistory = useCallback(() => {
     setHistoryLoading(true);
-    const saved = localStorage.getItem("node_test_history");
+    migrateLegacyCache("node_test_history");
+    const saved = localStorage.getItem(cacheKey("node_test_history"));
     if (saved) {
       try {
         setTestHistory(JSON.parse(saved));
@@ -266,7 +295,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
       }
     }
     setHistoryLoading(false);
-  }, []);
+  }, [cacheKey, migrateLegacyCache]);
 
   const nodesRef = useRef(nodes);
   useEffect(() => {
@@ -487,6 +516,9 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
     return new Date(timestamp).toLocaleString("zh-CN");
   };
 
+  // 登录状态：未登录时禁止测试/刷新/历史等操作（涉及账号隔离的缓存数据）
+  const isLoggedIn = !!user?.username;
+
   return (
     <div className="flex flex-col h-full gap-4">
       <div className="flex items-center justify-between">
@@ -503,7 +535,9 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
             variant="ghost"
             size="sm"
             onClick={() => setShowHistory(!showHistory)}
+            disabled={!isLoggedIn}
             className="h-8 px-3 text-xs"
+            title={!isLoggedIn ? "请先登录" : undefined}
           >
             <History className="h-3.5 w-3.5 mr-1.5" />
             {showHistory ? "返回列表" : "测试历史"}
@@ -511,8 +545,9 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
           <Button
             size="sm"
             onClick={() => void loadNodes()}
-            disabled={loading}
+            disabled={loading || !isLoggedIn}
             className="h-8 px-3 text-xs"
+            title={!isLoggedIn ? "请先登录" : undefined}
           >
             {loading ? (
               <>
@@ -574,8 +609,9 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
               <Button
                 size="sm"
                 onClick={openBatchSpeedTestWithNodes}
-                disabled={loading || (visibleSelectedCount === 0 && filteredNodes.length === 0)}
+                disabled={!isLoggedIn || loading || (visibleSelectedCount === 0 && filteredNodes.length === 0)}
                 className="h-8 px-3 text-xs"
+                title={!isLoggedIn ? "请先登录" : undefined}
               >
                 <Zap className="h-3.5 w-3.5 mr-1.5" />
                 {visibleSelectedCount > 0 ? `节点测试 (${visibleSelectedCount})` : "全部测试"}
@@ -747,7 +783,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
       ) : (
         <div className="flex-1 min-h-0">
           <div className={cn(
-            "h-full max-h-full rounded-md border bg-card overflow-x-auto overflow-y-auto visible-scrollbar",
+            "h-scroll-outer h-full max-h-full rounded-md border bg-card overflow-x-scroll overflow-y-auto visible-scrollbar",
             effectType === "frosted" && "backdrop-blur-md bg-card/80",
             effectType === "translucent" && "bg-card/80",
           )}>

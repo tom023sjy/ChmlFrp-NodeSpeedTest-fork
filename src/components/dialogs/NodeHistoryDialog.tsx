@@ -15,16 +15,18 @@ interface NodeHistoryDialogProps {
   nodeName: string;
   nodeId: number;
   type: "latency" | "speed";
+  /** 当前登录用户名，用于按账号隔离历史记录 */
+  username?: string;
 }
 
-export function NodeHistoryDialog({ isOpen, onClose, nodeName, nodeId: _nodeId, type }: NodeHistoryDialogProps) {
+export function NodeHistoryDialog({ isOpen, onClose, nodeName, nodeId: _nodeId, type, username }: NodeHistoryDialogProps) {
   const [history, setHistory] = useState<TestHistoryRecord[]>([]);
 
   useEffect(() => {
     if (isOpen) {
-      setHistory(getNodeTestHistory(nodeName));
+      setHistory(getNodeTestHistory(nodeName, username));
     }
-  }, [isOpen, nodeName]);
+  }, [isOpen, nodeName, username]);
 
   const stats = useMemo(() => getTestStats(history), [history]);
 

@@ -512,29 +512,6 @@ export function AppearanceSection({
             )}
           </>
         )}
-
-        <ItemSeparator />
-
-        <Item variant="outline" className="border-0">
-          <ItemContent>
-            <ItemTitle>反馈与建议</ItemTitle>
-            <ItemDescription className="text-xs">
-              在 GitHub Issues 提交问题反馈或功能建议
-            </ItemDescription>
-          </ItemContent>
-          <ItemActions>
-            <button
-              onClick={() => {
-                void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-                  openUrl("https://github.com/zhengddzz/ChmlFrp-Community-Toolbox/issues"),
-                );
-              }}
-              className="px-3 py-1.5 text-xs rounded bg-foreground text-background hover:opacity-90 transition-opacity cursor-pointer"
-            >
-              前往反馈
-            </button>
-          </ItemActions>
-        </Item>
       </div>
     </div>
   );

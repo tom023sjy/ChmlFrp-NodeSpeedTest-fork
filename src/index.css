@@ -240,6 +240,17 @@
   [data-slot="table-container"]::-webkit-scrollbar-track {
     background: transparent;
   }
+
+  /* 节点测试表格：让外层容器接管横向滚动，内层 table-container 不再独自滚动
+     这样横向滚动条会常驻在外层视口底部，无需滚动到表格内容最底部才能看到 */
+  .h-scroll-outer [data-slot="table-container"] {
+    overflow-x: visible;
+  }
+  .h-scroll-outer [data-slot="table-container"]::-webkit-scrollbar {
+    height: 0;
+    width: 0;
+    display: none;
+  }
   [data-slot="table-container"]::-webkit-scrollbar-thumb {
     background-color: rgba(156, 163, 175, 0.4);
     border-radius: 3px;

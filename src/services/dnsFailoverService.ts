@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ===== 类型定义（与后端 Rust 结构体对应，使用 camelCase）=====
 
-export type DnsProviderKind = "dnspodCn" | "dnspodCom" | "aliyun";
+export type DnsProviderKind = "dnspodCn" | "dnspodCom" | "aliyun" | "cloudflare";
 
 export interface DnsCredential {
   id: string;
@@ -15,6 +15,10 @@ export interface DnsCredential {
   secretKey?: string;
   /** DNSPod.com: 格式 "ID,Token" */
   token?: string;
+  /** Cloudflare: API Token */
+  apiToken?: string;
+  /** 凭证所属用户名（账号隔离用，由后端自动设置） */
+  ownerUsername?: string;
 }
 
 export interface TunnelTarget {
@@ -45,6 +49,14 @@ export interface DnsMonitorTask {
   recoverThreshold: number;
   /** 轮询间隔（秒），默认 60，范围 10-3600 */
   pollIntervalSecs: number;
+  /** 启用的检测方式列表，可选值："tunnel_state" / "node_state" / "tcping" */
+  checkMethods: string[];
+  /** 多少种检测方式不通过时判定主隧道异常（1 到 checkMethods.length） */
+  failMethodThreshold: number;
+  /** tcping 检测超时时间（秒），范围 1-10 */
+  tcpingTimeoutSecs: number;
+  /** 任务所属用户名（账号隔离用，由后端自动设置） */
+  ownerUsername?: string;
 }
 
 export interface TaskRuntime {
@@ -70,6 +82,8 @@ export interface DnsSwitchLog {
   success: boolean;
   message: string;
   time: string;
+  /** 日志所属用户名（账号隔离用） */
+  ownerUsername?: string;
 }
 
 export interface DnsMonitorEvent {
@@ -81,34 +95,34 @@ export interface DnsMonitorEvent {
 
 export class DnsFailoverService {
   // ===== 凭证管理 =====
-  async listCredentials(): Promise<DnsCredential[]> {
-    return invoke<DnsCredential[]>("list_dns_credentials");
+  async listCredentials(username: string): Promise<DnsCredential[]> {
+    return invoke<DnsCredential[]>("list_dns_credentials", { username });
   }
 
-  async saveCredential(credential: DnsCredential): Promise<DnsCredential> {
-    return invoke<DnsCredential>("save_dns_credential", { credential });
+  async saveCredential(username: string, credential: DnsCredential): Promise<DnsCredential> {
+    return invoke<DnsCredential>("save_dns_credential", { username, credential });
   }
 
-  async deleteCredential(id: string): Promise<void> {
-    await invoke("delete_dns_credential", { id });
+  async deleteCredential(username: string, id: string): Promise<void> {
+    await invoke("delete_dns_credential", { username, id });
   }
 
   // ===== 任务管理 =====
-  async listTasks(): Promise<DnsMonitorTask[]> {
-    return invoke<DnsMonitorTask[]>("list_dns_tasks");
+  async listTasks(username: string): Promise<DnsMonitorTask[]> {
+    return invoke<DnsMonitorTask[]>("list_dns_tasks", { username });
   }
 
-  async saveTask(task: DnsMonitorTask): Promise<DnsMonitorTask> {
-    return invoke<DnsMonitorTask>("save_dns_task", { task });
+  async saveTask(username: string, task: DnsMonitorTask): Promise<DnsMonitorTask> {
+    return invoke<DnsMonitorTask>("save_dns_task", { username, task });
   }
 
-  async deleteTask(id: string): Promise<void> {
-    await invoke("delete_dns_task", { id });
+  async deleteTask(username: string, id: string): Promise<void> {
+    await invoke("delete_dns_task", { username, id });
   }
 
   // ===== 运行时状态 =====
-  async listRuntime(): Promise<Record<string, TaskRuntime>> {
-    return invoke<Record<string, TaskRuntime>>("list_dns_runtime");
+  async listRuntime(username: string): Promise<Record<string, TaskRuntime>> {
+    return invoke<Record<string, TaskRuntime>>("list_dns_runtime", { username });
   }
 
   /** 手动触发一次检查（不等下一个 60s 周期） */
@@ -122,12 +136,12 @@ export class DnsFailoverService {
   }
 
   // ===== 日志 =====
-  async listLogs(): Promise<DnsSwitchLog[]> {
-    return invoke<DnsSwitchLog[]>("list_dns_logs");
+  async listLogs(username: string): Promise<DnsSwitchLog[]> {
+    return invoke<DnsSwitchLog[]>("list_dns_logs", { username });
   }
 
-  async clearLogs(): Promise<void> {
-    await invoke("clear_dns_logs");
+  async clearLogs(username: string): Promise<void> {
+    await invoke("clear_dns_logs", { username });
   }
 
   // ===== 事件监听 =====
@@ -153,6 +167,8 @@ export class DnsFailoverService {
         return "DNSPod.com（国际）";
       case "aliyun":
         return "Aliyun（阿里云）";
+      case "cloudflare":
+        return "Cloudflare";
     }
   }
 }

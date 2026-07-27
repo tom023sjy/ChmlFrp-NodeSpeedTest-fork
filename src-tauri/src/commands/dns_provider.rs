@@ -1,5 +1,5 @@
 // DNS 服务商抽象与实现
-// 支持 DNSPod.cn（腾讯云 API 3.0）、DNSPod.com（Token）、Aliyun（HMAC-SHA1）
+// 支持 DNSPod.cn（腾讯云 API 3.0）、DNSPod.com（Token）、Aliyun（HMAC-SHA1）、Cloudflare（API Token）
 // 仅暴露 list_records 与 upsert_cname 两个高层接口，供 dns_monitor 调用
 use base64::Engine;
 use hmac::{Hmac, Mac};
@@ -19,6 +19,8 @@ pub enum DnsProviderKind {
     DnspodCom,
     /// 阿里云（HMAC-SHA1 RPC）
     Aliyun,
+    /// Cloudflare（API Token）
+    Cloudflare,
 }
 
 /// 一组 DNS 凭证（与一个服务商一一对应）
@@ -40,6 +42,12 @@ pub struct DnsCredential {
     /// DNSPod.com: 格式 "ID,Token"
     #[serde(default)]
     pub token: String,
+    /// Cloudflare: API Token
+    #[serde(default)]
+    pub api_token: String,
+    /// 凭证所属用户名（账号隔离用，旧数据为空时视为所有用户可见）
+    #[serde(default)]
+    pub owner_username: String,
 }
 
 /// DNS 记录信息（用于查询现有记录）
@@ -63,6 +71,7 @@ pub async fn list_records(
         DnsProviderKind::DnspodCn => dnspod_cn::list_records(cred, domain, subdomain).await,
         DnsProviderKind::DnspodCom => dnspod_com::list_records(cred, domain, subdomain).await,
         DnsProviderKind::Aliyun => aliyun::list_records(cred, domain, subdomain).await,
+        DnsProviderKind::Cloudflare => cloudflare::list_records(cred, domain, subdomain).await,
     }
 }
 
@@ -77,6 +86,7 @@ pub async fn upsert_cname(
         DnsProviderKind::DnspodCn => dnspod_cn::upsert_cname(cred, domain, subdomain, cname_value).await,
         DnsProviderKind::DnspodCom => dnspod_com::upsert_cname(cred, domain, subdomain, cname_value).await,
         DnsProviderKind::Aliyun => aliyun::upsert_cname(cred, domain, subdomain, cname_value).await,
+        DnsProviderKind::Cloudflare => cloudflare::upsert_cname(cred, domain, subdomain, cname_value).await,
     }
 }
 
@@ -503,6 +513,209 @@ mod aliyun {
                 ("Value".to_string(), cname_value.to_string()),
             ];
             call(cred, "AddDomainRecord", params).await?;
+        }
+        Ok(())
+    }
+}
+
+// ===== Cloudflare（API Token）=====
+mod cloudflare {
+    use super::*;
+
+    const API_BASE: &str = "https://api.cloudflare.com/client/v4";
+
+    /// 获取指定域名的 Zone ID
+    /// Cloudflare 按 Zone 组织域名，需先查询 Zone ID 才能操作记录
+    async fn get_zone_id(cred: &DnsCredential, domain: &str) -> Result<String, String> {
+        let resp = http_client()?
+            .get(format!("{}/zones", API_BASE))
+            .header("Authorization", format!("Bearer {}", cred.api_token))
+            .query(&[("name", domain)])
+            .send()
+            .await
+            .map_err(|e| format!("Cloudflare 查询 Zone 失败: {}", e))?;
+
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        if !status.is_success() {
+            return Err(format!("Cloudflare HTTP {}: {}", status, body));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
+
+        if !value.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let msg = value
+                .get("errors")
+                .and_then(|e| e.get(0))
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("未知错误");
+            return Err(format!("Cloudflare 错误: {}", msg));
+        }
+
+        let zone_id = value
+            .get("result")
+            .and_then(|r| r.get(0))
+            .and_then(|z| z.get("id"))
+            .and_then(|i| i.as_str())
+            .ok_or_else(|| format!("未找到域名 {} 的 Zone", domain))?;
+        Ok(zone_id.to_string())
+    }
+
+    pub async fn list_records(
+        cred: &DnsCredential,
+        domain: &str,
+        subdomain: Option<&str>,
+    ) -> Result<Vec<DnsRecord>, String> {
+        let zone_id = get_zone_id(cred, domain).await?;
+
+        // 构造完整记录名用于过滤
+        let full_name = match subdomain {
+            Some(sub) if !sub.is_empty() => format!("{}.{}", sub, domain),
+            _ => domain.to_string(),
+        };
+
+        let resp = http_client()?
+            .get(format!("{}/zones/{}/dns_records", API_BASE, zone_id))
+            .header("Authorization", format!("Bearer {}", cred.api_token))
+            .query(&[("name", &full_name)])
+            .send()
+            .await
+            .map_err(|e| format!("Cloudflare 查询记录失败: {}", e))?;
+
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        if !status.is_success() {
+            return Err(format!("Cloudflare HTTP {}: {}", status, body));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
+
+        if !value.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let msg = value
+                .get("errors")
+                .and_then(|e| e.get(0))
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("未知错误");
+            return Err(format!("Cloudflare 错误: {}", msg));
+        }
+
+        let list = value.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let records = list
+            .into_iter()
+            .map(|item| {
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                // Cloudflare 返回的 name 是完整域名（subdomain.example.com）
+                // 截取为子域名前缀，便于上层统一处理
+                let sub = if name == domain {
+                    String::new()
+                } else if name.ends_with(&format!(".{}", domain)) {
+                    name[..name.len() - domain.len() - 1].to_string()
+                } else {
+                    name.clone()
+                };
+                DnsRecord {
+                    record_id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    record_type: item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    name: sub,
+                    value: item.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    line: String::new(),
+                }
+            })
+            .collect();
+        Ok(records)
+    }
+
+    pub async fn upsert_cname(
+        cred: &DnsCredential,
+        domain: &str,
+        subdomain: &str,
+        cname_value: &str,
+    ) -> Result<(), String> {
+        let zone_id = get_zone_id(cred, domain).await?;
+        let records = list_records(cred, domain, Some(subdomain)).await?;
+        let existing = records.into_iter().find(|r| r.name == subdomain);
+
+        // Cloudflare CNAME 记录名（完整 FQDN）
+        let record_name = if subdomain.is_empty() {
+            domain.to_string()
+        } else {
+            format!("{}.{}", subdomain, domain)
+        };
+
+        // Cloudflare 要求 CNAME 值以点结尾（FQDN），但兼容不以点结尾的输入
+        let normalized_value = if cname_value.ends_with('.') {
+            cname_value.to_string()
+        } else {
+            format!("{}.", cname_value)
+        };
+
+        if let Some(rec) = existing {
+            if rec.record_type.eq_ignore_ascii_case("CNAME") && rec.value.trim_end_matches('.') == cname_value.trim_end_matches('.') {
+                return Ok(());
+            }
+            let resp = http_client()?
+                .put(format!("{}/zones/{}/dns_records/{}", API_BASE, zone_id, rec.record_id))
+                .header("Authorization", format!("Bearer {}", cred.api_token))
+                .json(&serde_json::json!({
+                    "type": "CNAME",
+                    "name": record_name,
+                    "content": normalized_value,
+                    "proxied": false,
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("Cloudflare 更新记录失败: {}", e))?;
+
+            let status = resp.status();
+            let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+            if !status.is_success() {
+                return Err(format!("Cloudflare HTTP {}: {}", status, body));
+            }
+            let value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
+            if !value.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let msg = value
+                    .get("errors")
+                    .and_then(|e| e.get(0))
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("未知错误");
+                return Err(format!("Cloudflare 错误: {}", msg));
+            }
+        } else {
+            let resp = http_client()?
+                .post(format!("{}/zones/{}/dns_records", API_BASE, zone_id))
+                .header("Authorization", format!("Bearer {}", cred.api_token))
+                .json(&serde_json::json!({
+                    "type": "CNAME",
+                    "name": record_name,
+                    "content": normalized_value,
+                    "proxied": false,
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("Cloudflare 创建记录失败: {}", e))?;
+
+            let status = resp.status();
+            let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+            if !status.is_success() {
+                return Err(format!("Cloudflare HTTP {}: {}", status, body));
+            }
+            let value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
+            if !value.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let msg = value
+                    .get("errors")
+                    .and_then(|e| e.get(0))
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("未知错误");
+                return Err(format!("Cloudflare 错误: {}", msg));
+            }
         }
         Ok(())
     }
