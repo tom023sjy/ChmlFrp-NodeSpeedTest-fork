@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { invoke } from "@tauri-apps/api/core";
+import { type StoredUser } from "@/services/api";
 import { dnsFailoverService } from "@/services/dnsFailoverService";
 import { setCloseAction, type CloseAction } from "@/lib/settings-utils";
 import { toast } from "sonner";
@@ -18,9 +19,11 @@ import { toast } from "sonner";
 interface CloseConfirmDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  /** 当前登录用户，用于按账号隔离查询任务 */
+  user?: StoredUser | null;
 }
 
-export function CloseConfirmDialog({ isOpen, onClose }: CloseConfirmDialogProps) {
+export function CloseConfirmDialog({ isOpen, onClose, user }: CloseConfirmDialogProps) {
   const [enabledTasks, setEnabledTasks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [remember, setRemember] = useState(false);
@@ -29,9 +32,15 @@ export function CloseConfirmDialog({ isOpen, onClose }: CloseConfirmDialogProps)
   useEffect(() => {
     if (!isOpen) return;
     setRemember(false);
+    // 未登录时无需查询任务
+    if (!user?.username) {
+      setEnabledTasks([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     dnsFailoverService
-      .listTasks()
+      .listTasks(user.username)
       .then((tasks) => {
         setEnabledTasks(
           tasks.filter((t) => t.enabled).map((t) => t.name),
@@ -42,7 +51,7 @@ export function CloseConfirmDialog({ isOpen, onClose }: CloseConfirmDialogProps)
         setEnabledTasks([]);
       })
       .finally(() => setLoading(false));
-  }, [isOpen]);
+  }, [isOpen, user?.username]);
 
   // 用户勾选"记住"时，把所选行为存为默认，下次关闭直接执行不再弹窗
   const persistIfRemembered = useCallback((action: CloseAction) => {

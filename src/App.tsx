@@ -282,6 +282,7 @@ function App() {
       <CloseConfirmDialog
         isOpen={showCloseDialog}
         onClose={() => setShowCloseDialog(false)}
+        user={user}
       />
       <div
         ref={appContainerRef}
