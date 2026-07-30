@@ -43,7 +43,7 @@ import {
   type ScheduleMode,
   type TimeInterval,
 } from "@/services/ddnsService";
-import { dnsFailoverService } from "@/services/dnsFailoverService";
+import { dnsFailoverService, type DnsProviderKind } from "@/services/dnsFailoverService";
 
 interface DnsManagementProps {
   user?: StoredUser | null;
@@ -514,7 +514,7 @@ function TaskEditDialog({
                 { value: "__chmlfrp__", label: "ChmlFrp 免费域名（当前登录账户）" },
                 ...credentials.map((c) => ({
                   value: c.id,
-                  label: `${c.name}（${dnsFailoverService.providerLabel(c.provider)}）`,
+                  label: `${c.name}（${dnsFailoverService.providerLabel(c.provider as DnsProviderKind)}）`,
                 })),
               ]}
               value={

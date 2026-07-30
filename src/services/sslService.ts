@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 
 /** ChmlFrp 免费域名凭证的特殊标识（与后端保持一致） */
 export const CHMLFRP_CREDENTIAL_ID = "__chmlfrp__";
