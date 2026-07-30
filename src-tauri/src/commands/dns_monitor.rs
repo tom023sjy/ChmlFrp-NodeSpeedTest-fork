@@ -5,7 +5,7 @@
 // 主隧道恢复连续 2 次 → 回切到主隧道
 // CNAME 值取所选隧道的 ip 字段
 use super::dns_config::{self, DnsRuntimeState, DnsSwitchLog, DnsMonitorTask, TaskRuntime, TunnelTarget, UserTokenState};
-use super::dns_provider::{self, DnsCredential};
+use super::dns_provider::{self, DnsCredential, DnsProviderKind};
 use chrono::{Local, Utc};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
@@ -15,6 +15,11 @@ use tokio::sync::Mutex as TokioMutex;
 /// 调度器基础 tick（秒）：每隔此时长检查一次各任务是否到达轮询时间
 const SCHEDULER_TICK_SECS: u64 = 10;
 const TUNNEL_API_BASE: &str = "https://cf-v2.uapis.cn";
+
+/// ChmlFrp 免费域名凭证的特殊标识。
+/// 当任务 credential_id 等于此值时，调度器自动用当前登录用户的 accessToken
+/// 构造临时 ChmlFrp 凭证，无需在凭证列表中手动创建。
+const CHMLFRP_CREDENTIAL_ID: &str = "__chmlfrp__";
 
 /// 将 API 可能返回的多种 tunnelState 格式统一解析为 Option<bool>
 fn parse_bool_value(raw: &Option<serde_json::Value>) -> Option<bool> {
@@ -518,6 +523,10 @@ fn find_credential(
     id: &str,
     owner_username: &str,
 ) -> Result<DnsCredential, String> {
+    // ChmlFrp 免费域名：用当前登录用户的 accessToken 构造临时凭证
+    if id == CHMLFRP_CREDENTIAL_ID {
+        return build_chmlfrp_credential_from_user_token(app_handle);
+    }
     let path = dns_config_path(app_handle, "dns-credentials.json")?;
     let list: Vec<DnsCredential> = read_json(&path, Vec::new());
     list.into_iter()
@@ -526,6 +535,30 @@ fn find_credential(
                 && (c.owner_username.is_empty() || c.owner_username == owner_username)
         })
         .ok_or_else(|| format!("未找到凭证: {}", id))
+}
+
+/// 从 UserTokenState 取 accessToken 构造 ChmlFrp 临时凭证
+fn build_chmlfrp_credential_from_user_token(app_handle: &tauri::AppHandle) -> Result<DnsCredential, String> {
+    let state = app_handle
+        .try_state::<UserTokenState>()
+        .ok_or_else(|| "未找到用户登录状态".to_string())?;
+    let guard = state.0.lock().map_err(|e| format!("锁错误: {}", e))?;
+    let access_token = guard
+        .clone()
+        .ok_or_else(|| "未登录或登录已过期，无法使用 ChmlFrp 免费域名凭证".to_string())?;
+    if access_token.trim().is_empty() {
+        return Err("accessToken 为空，请先登录".to_string());
+    }
+    Ok(DnsCredential {
+        id: String::new(),
+        name: String::new(),
+        provider: DnsProviderKind::Chmlfrp,
+        secret_id: String::new(),
+        secret_key: String::new(),
+        token: access_token,
+        api_token: String::new(),
+        owner_username: String::new(),
+    })
 }
 
 fn get_runtime(app_handle: &tauri::AppHandle, task_id: &str, primary: &TunnelTarget) -> TaskRuntime {

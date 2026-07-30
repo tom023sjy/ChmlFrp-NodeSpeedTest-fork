@@ -4,6 +4,10 @@ import { TitleBar, WindowControls } from "@/components/TitleBar";
 import { NodeTest } from "@/components/pages/NodeTest";
 import { Settings } from "@/components/pages/Settings";
 import { DnsFailover } from "@/components/pages/DnsFailover";
+import { DnsManagement } from "@/components/pages/DnsManagement";
+import { SslManagement } from "@/components/pages/SslManagement";
+import { SslProgressProvider } from "@/components/pages/SslManagement/SslProgressContext";
+import { DnsCredentials } from "@/components/pages/DnsCredentials";
 import { getStoredUser, clearStoredUser, fetchUserInfo, type StoredUser } from "@/services/api";
 import { useAppTheme } from "@/components/App/hooks/useAppTheme";
 import { useTitleBar } from "@/components/App/hooks/useTitleBar";
@@ -159,6 +163,12 @@ function App() {
         return <NodeTest user={user} onTestingChange={handleTestingChange} />;
       case "dns-failover":
         return <DnsFailover user={user} />;
+      case "dns-management":
+        return <DnsManagement user={user} />;
+      case "dns-credentials":
+        return <DnsCredentials user={user} />;
+      case "ssl-certs":
+        return <SslManagement user={user} />;
       case "settings":
         return (
           <Settings
@@ -266,7 +276,7 @@ function App() {
   }, [user]);
 
   return (
-    <>
+    <SslProgressProvider>
       <UpdateDialog
         isOpen={updateInfo !== null}
         onClose={handleCloseUpdateDialog}
@@ -411,7 +421,7 @@ function App() {
           </div>
         )}
       </div>
-    </>
+    </SslProgressProvider>
   );
 }
 

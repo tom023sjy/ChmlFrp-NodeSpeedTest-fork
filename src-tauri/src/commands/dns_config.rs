@@ -4,9 +4,8 @@ use crate::utils::get_app_data_dir;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::Manager;
 
-use super::dns_provider::{DnsCredential, DnsProviderKind};
+use super::dns_provider::{verify_credential, DnsCredential};
 
 /// 一个隧道目标（用于匹配监控的隧道与切换目标）
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,18 +132,18 @@ pub struct DnsSwitchLog {
     pub owner_username: String,
 }
 
-const CREDENTIALS_FILE: &str = "dns-credentials.json";
+pub const CREDENTIALS_FILE: &str = "dns-credentials.json";
 const TASKS_FILE: &str = "dns-tasks.json";
 const LOGS_FILE: &str = "dns-logs.json";
 
-fn dns_data_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub fn dns_data_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let base = get_app_data_dir(app_handle)?;
     let dir = base.join("dns-failover");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 DNS 配置目录失败: {}", e))?;
     Ok(dir)
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf, default: T) -> T {
+pub fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf, default: T) -> T {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -158,6 +157,12 @@ fn write_json<T: Serialize>(path: &PathBuf, data: &T) -> Result<(), String> {
 
 // ===== 凭证管理命令 =====
 
+/// 读取所有凭证（调度器内部使用，不限用户）
+pub fn list_all_credentials(app_handle: &tauri::AppHandle) -> Result<Vec<DnsCredential>, String> {
+    let path = dns_data_dir(app_handle)?.join(CREDENTIALS_FILE);
+    Ok(read_json(&path, Vec::new()))
+}
+
 #[tauri::command]
 pub async fn list_dns_credentials(
     app_handle: tauri::AppHandle,
@@ -170,6 +175,13 @@ pub async fn list_dns_credentials(
         .into_iter()
         .filter(|c| c.owner_username.is_empty() || c.owner_username == username)
         .collect())
+}
+
+/// 验证 DNS 凭证是否有效（执行一次轻量级「列出域名」调用）
+/// 用于保存前校验，失败返回带服务商标识的错误信息
+#[tauri::command]
+pub async fn dns_verify_credential(credential: DnsCredential) -> Result<(), String> {
+    verify_credential(&credential).await
 }
 
 #[tauri::command]
@@ -386,4 +398,152 @@ pub async fn list_dns_runtime(
         result.insert(task.id, rt);
     }
     Ok(result)
+}
+
+// ===== TXT 记录清理 =====
+
+/// TXT 记录条目（用于清理界面展示与删除）
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TxtRecordItem {
+    /// 凭证 ID（ChmlFrp 用特殊标识）
+    pub credential_id: String,
+    /// 凭证显示名（如「ChmlFrp 免费域名」或「我的凭证（DNSPod.cn）」）
+    pub credential_label: String,
+    /// 主域名
+    pub domain: String,
+    /// 记录 ID（删除时使用）
+    pub record_id: String,
+    /// 记录名（子域名前缀，如 _acme-challenge）
+    pub name: String,
+    /// 记录值
+    pub value: String,
+}
+
+/// 列出所有凭证（含 ChmlFrp 免费域名）下的全部 TXT 记录
+/// 用于数据维护中的「清除遗留 TXT 解析」功能
+#[tauri::command]
+pub async fn dns_list_all_txt_records(
+    app_handle: tauri::AppHandle,
+    username: String,
+    state: tauri::State<'_, UserTokenState>,
+) -> Result<Vec<TxtRecordItem>, String> {
+    let mut items = Vec::new();
+
+    // 1. 遍历用户的所有 DNS 凭证
+    let creds = list_all_credentials(&app_handle)?
+        .into_iter()
+        .filter(|c| c.owner_username.is_empty() || c.owner_username == username)
+        .collect::<Vec<_>>();
+
+    for cred in &creds {
+        let label = format!("{}（{}）", cred.name, super::dns_provider::provider_label(cred.provider));
+        // 列出该凭证下所有主域名
+        let domains = match super::dns_provider::list_domains(cred).await {
+            Ok(d) => d,
+            Err(e) => {
+                // 单个凭证失败不中断整体扫描，记录错误继续
+                eprintln!("列出域名失败 [{}]: {}", label, e);
+                continue;
+            }
+        };
+        for domain in domains {
+            // 列出该域名下所有记录（subdomain=None 表示全部）
+            let records = match super::dns_provider::list_records(cred, &domain, None).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("列出记录失败 [{} / {}]: {}", label, domain, e);
+                    continue;
+                }
+            };
+            for rec in records {
+                if rec.record_type.eq_ignore_ascii_case("TXT") {
+                    items.push(TxtRecordItem {
+                        credential_id: cred.id.clone(),
+                        credential_label: label.clone(),
+                        domain: domain.clone(),
+                        record_id: rec.record_id,
+                        name: rec.name,
+                        value: rec.value,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. ChmlFrp 免费域名（用当前登录账户的 accessToken）
+    let access_token = {
+        let guard = state.0.lock().map_err(|e| format!("锁错误: {}", e))?;
+        guard.clone()
+    };
+    if let Some(token) = access_token {
+        let chmlfrp_cred = super::dns_provider::DnsCredential {
+            id: String::new(),
+            name: String::new(),
+            provider: super::dns_provider::DnsProviderKind::Chmlfrp,
+            secret_id: String::new(),
+            secret_key: String::new(),
+            token: token.clone(),
+            api_token: String::new(),
+            owner_username: String::new(),
+        };
+        let label = "ChmlFrp 免费域名（当前登录账户）".to_string();
+        if let Ok(domains) = super::dns_provider::list_domains(&chmlfrp_cred).await {
+            for domain in domains {
+                if let Ok(records) = super::dns_provider::list_records(&chmlfrp_cred, &domain, None).await {
+                    for rec in records {
+                        if rec.record_type.eq_ignore_ascii_case("TXT") {
+                            items.push(TxtRecordItem {
+                                credential_id: "__chmlfrp__".to_string(),
+                                credential_label: label.clone(),
+                                domain: domain.clone(),
+                                record_id: rec.record_id,
+                                name: rec.name,
+                                value: rec.value,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(items)
+}
+
+/// 删除指定的 TXT 记录
+#[tauri::command]
+pub async fn dns_delete_txt_record(
+    app_handle: tauri::AppHandle,
+    username: String,
+    credential_id: String,
+    domain: String,
+    record_id: String,
+    state: tauri::State<'_, UserTokenState>,
+) -> Result<(), String> {
+    // ChmlFrp 免费域名特殊处理
+    if credential_id == "__chmlfrp__" {
+        let access_token = {
+            let guard = state.0.lock().map_err(|e| format!("锁错误: {}", e))?;
+            guard.clone().ok_or_else(|| "未登录或登录已过期".to_string())?
+        };
+        let cred = super::dns_provider::DnsCredential {
+            id: String::new(),
+            name: String::new(),
+            provider: super::dns_provider::DnsProviderKind::Chmlfrp,
+            secret_id: String::new(),
+            secret_key: String::new(),
+            token: access_token,
+            api_token: String::new(),
+            owner_username: String::new(),
+        };
+        return super::dns_provider::delete_record(&cred, &domain, &record_id).await;
+    }
+
+    // 查找用户凭证（账号隔离校验）
+    let cred = list_all_credentials(&app_handle)?
+        .into_iter()
+        .find(|c| c.id == credential_id && (c.owner_username.is_empty() || c.owner_username == username))
+        .ok_or_else(|| format!("未找到凭证: {}", credential_id))?;
+    super::dns_provider::delete_record(&cred, &domain, &record_id).await
 }

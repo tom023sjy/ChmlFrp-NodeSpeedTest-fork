@@ -5,6 +5,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type DnsProviderKind = "dnspodCn" | "dnspodCom" | "aliyun" | "cloudflare";
 
+/**
+ * ChmlFrp 免费域名凭证的特殊标识。
+ * 当任务 credentialId 等于此值时，后端调度器会自动用当前登录用户的 accessToken
+ * 构造临时 ChmlFrp 凭证，无需在凭证列表中手动创建。
+ */
+export const CHMLFRP_CREDENTIAL_ID = "__chmlfrp__";
+
 export interface DnsCredential {
   id: string;
   name: string;
@@ -107,6 +114,11 @@ export class DnsFailoverService {
     await invoke("delete_dns_credential", { username, id });
   }
 
+  /** 验证凭证有效性（保存前调用，失败抛出带服务商标识的错误） */
+  async verifyCredential(credential: DnsCredential): Promise<void> {
+    await invoke<void>("dns_verify_credential", { credential });
+  }
+
   // ===== 任务管理 =====
   async listTasks(username: string): Promise<DnsMonitorTask[]> {
     return invoke<DnsMonitorTask[]>("list_dns_tasks", { username });
@@ -171,6 +183,38 @@ export class DnsFailoverService {
         return "Cloudflare";
     }
   }
+
+  // ===== TXT 记录清理 =====
+
+  /** 列出所有凭证（含 ChmlFrp 免费域名）下的全部 TXT 记录 */
+  async listAllTxtRecords(username: string): Promise<TxtRecordItem[]> {
+    return invoke<TxtRecordItem[]>("dns_list_all_txt_records", { username });
+  }
+
+  /** 删除指定的 TXT 记录 */
+  async deleteTxtRecord(
+    username: string,
+    credentialId: string,
+    domain: string,
+    recordId: string,
+  ): Promise<void> {
+    return invoke<void>("dns_delete_txt_record", {
+      username,
+      credentialId,
+      domain,
+      recordId,
+    });
+  }
+}
+
+/** TXT 记录条目（用于清理界面展示与删除） */
+export interface TxtRecordItem {
+  credentialId: string;
+  credentialLabel: string;
+  domain: string;
+  recordId: string;
+  name: string;
+  value: string;
 }
 
 export const dnsFailoverService = new DnsFailoverService();

@@ -157,8 +157,13 @@ export function Select({
               left: menuStyle.left,
               width: menuStyle.width,
               maxHeight: menuStyle.maxHeight,
+              overflowY: "auto",
             }}
-            className="fixed z-[60] bg-card border border-border/60 rounded-lg shadow-lg overflow-auto pointer-events-auto visible-scrollbar"
+            className="fixed z-[60] bg-card border border-border/60 rounded-lg shadow-lg pointer-events-auto visible-scrollbar"
+            onWheel={(e) => {
+              // 阻止滚轮事件冒泡到外层 overflow-y-auto 容器，确保菜单自身可滚动
+              e.stopPropagation();
+            }}
           >
             {options.map((option) => (
               <button

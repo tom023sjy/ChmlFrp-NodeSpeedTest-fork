@@ -8,9 +8,12 @@ import {
   ItemActions,
 } from "@/components/ui/item";
 import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   getCloseAction,
   setCloseAction,
+  getBetaTooltipEnabled,
+  setBetaTooltipEnabled,
   type CloseAction,
 } from "@/lib/settings-utils";
 
@@ -25,6 +28,9 @@ export function GeneralSection() {
   const [closeAction, setCloseActionState] = useState<CloseAction>(() =>
     getCloseAction(),
   );
+  const [betaTooltip, setBetaTooltip] = useState(() =>
+    getBetaTooltipEnabled(),
+  );
 
   // 监听关闭行为变更（关闭弹窗记忆选择时会同步更新这里）
   useEffect(() => {
@@ -33,10 +39,21 @@ export function GeneralSection() {
     return () => window.removeEventListener("closeActionChanged", handler);
   }, []);
 
+  useEffect(() => {
+    const handler = () => setBetaTooltip(getBetaTooltipEnabled());
+    window.addEventListener("betaTooltipChanged", handler);
+    return () => window.removeEventListener("betaTooltipChanged", handler);
+  }, []);
+
   const handleChange = (value: string | number) => {
     const action = String(value) as CloseAction;
     setCloseAction(action);
     setCloseActionState(action);
+  };
+
+  const handleBetaToggle = (checked: boolean) => {
+    setBetaTooltipEnabled(checked);
+    setBetaTooltip(checked);
   };
 
   return (
@@ -61,6 +78,17 @@ export function GeneralSection() {
               size="sm"
               className="w-32"
             />
+          </ItemActions>
+        </Item>
+        <Item variant="outline" className="border-0 border-t">
+          <ItemContent>
+            <ItemTitle>Beta 功能提示</ItemTitle>
+            <ItemDescription className="text-xs">
+              鼠标悬浮 Beta 标签时显示测试功能免责声明提示窗
+            </ItemDescription>
+          </ItemContent>
+          <ItemActions>
+            <Switch checked={betaTooltip} onCheckedChange={handleBetaToggle} />
           </ItemActions>
         </Item>
       </div>

@@ -9,7 +9,11 @@ import {
   Network,
   RotateCcw,
   Shield,
+  ShieldCheck,
+  Globe,
+  KeyRound,
 } from "lucide-react";
+import { BetaTag } from "@/components/ui/beta-tag";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import {
   clearStoredUser,
@@ -23,6 +27,8 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { SidebarMode } from "@/lib/settings-utils";
 import { getInitialEffectType, type EffectType } from "@/lib/settings-utils";
+
+/** Beta 功能悬浮提示内容由统一组件 BetaTag 提供 */
 
 interface SidebarProps {
   activeTab: string;
@@ -284,9 +290,30 @@ export function Sidebar({
     }
   };
 
-  const menuItems = [
+  const menuItems: {
+    id: string;
+    label: string;
+    icon: typeof Network;
+    beta?: boolean;
+    betaTitle?: string;
+  }[] = [
     { id: "node-test", label: "节点推荐", icon: Network },
+    { id: "dns-credentials", label: "DNS 服务商", icon: KeyRound },
     { id: "dns-failover", label: "DNS 容灾", icon: Shield },
+    {
+      id: "dns-management",
+      label: "DDNS 解析",
+      icon: Globe,
+      beta: true,
+      betaTitle: "Beta 测试功能：此功能仍在测试阶段，可能出现数据异常、功能不稳定等问题，开发者不承担任何由此造成的损失或责任，请谨慎使用。",
+    },
+    {
+      id: "ssl-certs",
+      label: "SSL 证书",
+      icon: ShieldCheck,
+      beta: true,
+      betaTitle: "Beta 测试功能：此功能仍在测试阶段，可能出现数据异常、功能不稳定等问题，开发者不承担任何由此造成的损失或责任，请谨慎使用。",
+    },
     { id: "settings", label: "设置", icon: SettingsIcon },
   ];
 
@@ -570,6 +597,12 @@ export function Sidebar({
                       )}
                     />
                     <span className="tracking-tight">{item.label}</span>
+                    {item.beta && item.betaTitle && (
+                      <BetaTag
+                        betaTitle={item.betaTitle}
+                        className="ml-auto"
+                      />
+                    )}
                   </button>
                 </li>
               );
@@ -754,7 +787,7 @@ export function Sidebar({
                         gap: collapsed ? "0px" : "12px",
                         justifyContent: "flex-start",
                       }}
-                      title={collapsed ? item.label : undefined}
+                      title={collapsed ? (item.beta ? `${item.label}（Beta）` : item.label) : undefined}
                     >
                       {isActive && (
                         <div
@@ -779,11 +812,17 @@ export function Sidebar({
                           transform: collapsed
                             ? "translateX(-10px)"
                             : "translateX(0)",
-                          transition: "all 0.5s cubic-bezier(0.32, 0.72, 0, 1)",
+                          transition: "all 0.5s cubic-bezier(0.32,0.72,0,1)",
                         }}
                       >
                         {item.label}
                       </span>
+                      {item.beta && !collapsed && item.betaTitle && (
+                        <BetaTag
+                          betaTitle={item.betaTitle}
+                          className="ml-auto"
+                        />
+                      )}
                     </button>
                   </li>
                 );

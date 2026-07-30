@@ -6,12 +6,14 @@ import { toast } from "sonner";
 import { type StoredUser } from "@/services/api";
 import { dnsFailoverService, type DnsSwitchLog } from "@/services/dnsFailoverService";
 import { useEffectType, getCardClassName } from "@/lib/useEffectType";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface LogsTabProps {
   user?: StoredUser | null;
 }
 
 export function LogsTab({ user }: LogsTabProps) {
+  const confirm = useConfirm();
   const [list, setList] = useState<DnsSwitchLog[]>([]);
   const [loading, setLoading] = useState(true);
   const effectType = useEffectType();
@@ -38,7 +40,13 @@ export function LogsTab({ user }: LogsTabProps) {
 
   const handleClear = async () => {
     if (!user?.username) return;
-    if (!confirm("确认清空所有切换日志？")) return;
+    const ok = await confirm({
+      title: "清空切换日志",
+      description: "确认清空所有切换日志？此操作不可恢复。",
+      confirmText: "清空",
+      variant: "destructive",
+    });
+    if (!ok) return;
     try {
       await dnsFailoverService.clearLogs(user.username);
       toast.success("已清空");

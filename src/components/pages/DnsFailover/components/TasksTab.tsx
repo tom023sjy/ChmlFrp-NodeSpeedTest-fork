@@ -27,14 +27,17 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { type StoredUser, fetchTunnels, type Tunnel } from "@/services/api";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   dnsFailoverService,
+  CHMLFRP_CREDENTIAL_ID,
   type DnsMonitorTask,
   type DnsCredential,
   type TunnelTarget,
   type TaskRuntime,
   type DnsMonitorEvent,
 } from "@/services/dnsFailoverService";
+import { ddnsService, type ChmlfrpAvailableDomain } from "@/services/ddnsService";
 import { TunnelSelect } from "./TunnelSelect";
 import { useEffectType, getCardClassName } from "@/lib/useEffectType";
 
@@ -85,11 +88,14 @@ const CHECK_METHOD_META: Record<string, { label: string; desc: string; pros: str
 };
 
 export function TasksTab({ user }: TasksTabProps) {
+  const confirm = useConfirm();
   const [list, setList] = useState<DnsMonitorTask[]>([]);
   const [credentials, setCredentials] = useState<DnsCredential[]>([]);
   const [runtime, setRuntime] = useState<Record<string, TaskRuntime>>({});
   const [tunnels, setTunnels] = useState<Tunnel[]>([]);
   const [tunnelsLoading, setTunnelsLoading] = useState(false);
+  const [chmlfrpDomains, setChmlfrpDomains] = useState<ChmlfrpAvailableDomain[]>([]);
+  const [chmlfrpDomainsLoading, setChmlfrpDomainsLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<DnsMonitorTask | null>(null);
   const [checkingTaskIds, setCheckingTaskIds] = useState<Set<string>>(new Set());
@@ -137,6 +143,22 @@ export function TasksTab({ user }: TasksTabProps) {
     }
   }, [tunnels.length, tunnelsLoading]);
 
+  // 仅在打开对话框且选择 ChmlFrp 凭证时加载可用主域名列表
+  const ensureChmlfrpDomainsLoaded = useCallback(async () => {
+    if (chmlfrpDomains.length > 0 || chmlfrpDomainsLoading) return;
+    setChmlfrpDomainsLoading(true);
+    try {
+      const domains = await ddnsService.listAvailableDomains();
+      setChmlfrpDomains(domains);
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "获取 ChmlFrp 可用域名列表失败",
+      );
+    } finally {
+      setChmlfrpDomainsLoading(false);
+    }
+  }, [chmlfrpDomains.length, chmlfrpDomainsLoading]);
+
   useEffect(() => {
     load();
     let unlisten: (() => void) | undefined;
@@ -150,19 +172,15 @@ export function TasksTab({ user }: TasksTabProps) {
   }, [load]);
 
   const handleAdd = () => {
-    if (credentials.length === 0) {
-      toast.error("请先在「DNS 凭证」Tab 中添加凭证");
-      return;
-    }
     if (!user?.usertoken) {
       toast.error("请先登录账户");
       return;
     }
-    const cred = credentials[0];
+    // 默认选择 ChmlFrp 免费域名（用当前登录账户），用户也可改为其他 DNS 凭证
     setEditing({
       ...EMPTY_TASK,
       id: dnsFailoverService.genId(),
-      credentialId: cred.id,
+      credentialId: CHMLFRP_CREDENTIAL_ID,
       userToken: user.usertoken,
     });
     // 打开对话框时加载隧道列表（仅首次加载，已加载则跳过）
@@ -184,8 +202,9 @@ export function TasksTab({ user }: TasksTabProps) {
       failMethodThreshold,
       tcpingTimeoutSecs,
     });
-    // 打开对话框时加载隧道列表（仅首次加载，已加载则跳过）
+    // 打开对话框时加载隧道列表和 ChmlFrp 可用域名（仅首次加载，已加载则跳过）
     void ensureTunnelsLoaded();
+    void ensureChmlfrpDomainsLoaded();
   };
 
   const handleSave = async () => {
@@ -243,7 +262,13 @@ export function TasksTab({ user }: TasksTabProps) {
   };
 
   const handleDelete = async (task: DnsMonitorTask) => {
-    if (!confirm(`确认删除任务「${task.name}」？`)) return;
+    const ok = await confirm({
+      title: "删除任务",
+      description: `确认删除任务「${task.name}」？删除后将停止该任务的监控。`,
+      confirmText: "删除",
+      variant: "destructive",
+    });
+    if (!ok) return;
     try {
       if (!user?.username) {
         toast.error("未登录");
@@ -503,31 +528,63 @@ export function TasksTab({ user }: TasksTabProps) {
                 </div>
               </div>
 
-              {/* DNS 凭证 */}
+              {/* DNS 服务商 */}
               <div className="space-y-1.5">
-                <Label>DNS 凭证</Label>
+                <Label>DNS 服务商</Label>
                 <Select
-                  options={credentials.map((c) => ({
-                    value: c.id,
-                    label: `${c.name}（${dnsFailoverService.providerLabel(c.provider)}）`,
-                  }))}
+                  options={[
+                    {
+                      value: CHMLFRP_CREDENTIAL_ID,
+                      label: "ChmlFrp 免费域名（当前登录账户）",
+                    },
+                    ...credentials.map((c) => ({
+                      value: c.id,
+                      label: `${c.name}（${dnsFailoverService.providerLabel(c.provider)}）`,
+                    })),
+                  ]}
                   value={editing.credentialId}
-                  onChange={(v) =>
-                    setEditing({ ...editing, credentialId: String(v) })
-                  }
+                  onChange={(v) => {
+                    const newCredId = String(v);
+                    // 切换凭证来源时清空主域名，避免不同来源的域名格式不匹配
+                    setEditing({
+                      ...editing,
+                      credentialId: newCredId,
+                      domain: "",
+                    });
+                    // 切换到 ChmlFrp 时确保可用域名列表已加载
+                    if (newCredId === CHMLFRP_CREDENTIAL_ID) {
+                      void ensureChmlfrpDomainsLoaded();
+                    }
+                  }}
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label>主域名</Label>
-                  <Input
-                    value={editing.domain}
-                    onChange={(e) =>
-                      setEditing({ ...editing, domain: e.target.value })
-                    }
-                    placeholder="example.com"
-                  />
+                  {editing.credentialId === CHMLFRP_CREDENTIAL_ID ? (
+                    <Select
+                      options={chmlfrpDomains.map((d) => ({
+                        value: d.domain,
+                        label: d.domain + (d.icpFiling ? "（已备案）" : ""),
+                      }))}
+                      value={editing.domain}
+                      onChange={(v) =>
+                        setEditing({ ...editing, domain: String(v) })
+                      }
+                      placeholder={
+                        chmlfrpDomainsLoading ? "加载中..." : "选择主域名"
+                      }
+                    />
+                  ) : (
+                    <Input
+                      value={editing.domain}
+                      onChange={(e) =>
+                        setEditing({ ...editing, domain: e.target.value })
+                      }
+                      placeholder="example.com"
+                    />
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>子域名前缀</Label>

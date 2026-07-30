@@ -1,16 +1,14 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
-import { Shield, KeyRound, ListChecks, ScrollText } from "lucide-react";
+import { Shield, ListChecks, ScrollText } from "lucide-react";
 import { type StoredUser } from "@/services/api";
-import { CredentialsTab } from "./components/CredentialsTab";
 import { TasksTab } from "./components/TasksTab";
 import { LogsTab } from "./components/LogsTab";
 
-type TabId = "tasks" | "credentials" | "logs";
+type TabId = "tasks" | "logs";
 
 const TABS: { id: TabId; label: string; icon: typeof Shield }[] = [
   { id: "tasks", label: "监控任务", icon: ListChecks },
-  { id: "credentials", label: "DNS 凭证", icon: KeyRound },
   { id: "logs", label: "切换日志", icon: ScrollText },
 ];
 
@@ -63,7 +61,6 @@ export function DnsFailover({ user }: DnsFailoverProps) {
       <div className="flex-1 min-h-0 overflow-y-auto visible-scrollbar">
         <div className="p-6">
           {activeTab === "tasks" && <TasksTab user={user} />}
-          {activeTab === "credentials" && <CredentialsTab user={user} />}
           {activeTab === "logs" && <LogsTab user={user} />}
         </div>
       </div>

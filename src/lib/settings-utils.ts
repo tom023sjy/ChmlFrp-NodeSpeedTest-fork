@@ -122,3 +122,16 @@ export const getInitialShowTitleBar = (): boolean => {
   if (stored === null) return !isMacOS;
   return stored === "true";
 };
+
+// Beta 功能提示窗是否显示（默认显示）
+export const getBetaTooltipEnabled = (): boolean => {
+  if (typeof window === "undefined") return true;
+  const stored = localStorage.getItem("betaTooltipEnabled");
+  return stored !== "false";
+};
+
+export const setBetaTooltipEnabled = (enabled: boolean): void => {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("betaTooltipEnabled", String(enabled));
+  window.dispatchEvent(new Event("betaTooltipChanged"));
+};

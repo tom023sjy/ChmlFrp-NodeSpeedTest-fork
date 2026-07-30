@@ -5,6 +5,7 @@ import "@/App.css";
 import "@/frosted-glass.css";
 import App from "@/App.tsx";
 import { Toaster } from "@/components/ui/sonner";
+import { ConfirmProvider } from "@/components/ui/confirm-dialog";
 
 const preventTextSelection = () => {
   const isInputElement = (element: HTMLElement | null): boolean => {
@@ -104,7 +105,9 @@ preventContextMenu();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
-    <Toaster />
+    <ConfirmProvider>
+      <App />
+      <Toaster />
+    </ConfirmProvider>
   </StrictMode>,
 );

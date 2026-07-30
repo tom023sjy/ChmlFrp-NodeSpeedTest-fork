@@ -4,6 +4,7 @@ mod utils;
 
 use commands::dns_config::{DnsRuntimeState, UserTokenState};
 use commands::dns_monitor;
+use commands::ddns_monitor;
 use commands::update::{launch_installer_silent, take_pending_installer, PendingInstaller};
 use models::FrpcProcesses;
 use tauri::{
@@ -110,6 +111,8 @@ pub fn run() {
 
             // 启动 DNS 容灾监控常驻任务
             dns_monitor::start_monitor(app.handle().clone());
+            // 启动 DDNS 动态解析调度器
+            ddns_monitor::start_monitor(app.handle().clone());
 
             Ok(())
         })
@@ -145,6 +148,9 @@ pub fn run() {
             commands::list_dns_credentials,
             commands::save_dns_credential,
             commands::delete_dns_credential,
+            commands::dns_verify_credential,
+            commands::dns_list_all_txt_records,
+            commands::dns_delete_txt_record,
             commands::list_dns_tasks,
             commands::save_dns_task,
             commands::delete_dns_task,
@@ -154,6 +160,26 @@ pub fn run() {
             commands::trigger_dns_check,
             commands::trigger_dns_check_task,
             commands::set_user_token,
+            // DDNS 动态解析相关命令（基于 ChmlFrp 免费域名 API）
+            commands::ddns_list_available_domains,
+            commands::ddns_list_records,
+            commands::ddns_list_interfaces,
+            commands::list_ddns_tasks,
+            commands::save_ddns_task,
+            commands::delete_ddns_task,
+            commands::list_ddns_logs,
+            commands::clear_ddns_logs,
+            // SSL 证书自动申请相关命令
+            commands::ssl_list,
+            commands::ssl_detail,
+            commands::ssl_request,
+            commands::ssl_verify,
+            commands::ssl_delete,
+            commands::ssl_auto_request,
+            commands::ssl_auto_request_async,
+            commands::ssl_save_log,
+            commands::ssl_list_logs,
+            commands::ssl_clear_logs,
             // 窗口与托盘相关命令
             commands::minimize_to_tray,
             commands::exit_app,
