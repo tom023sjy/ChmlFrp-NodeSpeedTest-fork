@@ -21,6 +21,8 @@ jobs:
             args: --target aarch64-apple-darwin
           - platform: ubuntu-latest
             args: ""
+          - platform: ubuntu-22.04-arm
+            args: ""
           - platform: windows-latest
             args: ""
 
@@ -50,7 +52,7 @@ jobs:
           workspaces: './src-tauri -> target'
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-latest'
+        if: startsWith(matrix.platform, 'ubuntu-')
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
@@ -110,13 +112,15 @@ jobs:
             |------|--------|------|
             | Windows | `.msi` 或 `.exe` | 双击安装即可 |
             | macOS | `.dmg` | 拖拽到应用程序文件夹（仅支持 Apple Silicon） |
-            | Linux | `.deb` 或 `.AppImage` | 根据发行版安装 |
+            | Linux (x64) | `.deb` 或 `.AppImage` | 适用于 PC、服务器（Intel/AMD） |
+            | Linux (ARM64) | `.deb` 或 `.AppImage` | 适用于树莓派 4/5、香橙派等 ARM64 设备 |
 
             ## 📋 系统要求
 
             - **Windows**: Windows 10/11 (x64)
             - **macOS**: macOS 11.0+ (Apple Silicon)
-            - **Linux**: Ubuntu 20.04+ (x64)
+            - **Linux (x64)**: Ubuntu 20.04+ 或同等 Debian 系发行版
+            - **Linux (ARM64)**: Ubuntu 22.04+ / Raspberry Pi OS (Bookworm) / Armbian 等 aarch64 系统
 
             ---
 
