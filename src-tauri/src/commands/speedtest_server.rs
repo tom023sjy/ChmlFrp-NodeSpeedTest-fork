@@ -1,3 +1,8 @@
+// 本地测速服务器模块（合并 file_server + tcp_speed）
+// 安全防护：
+// - file_server: HTTP 请求校验 Host header 必须为 127.0.0.1/localhost，防御 DNS rebinding
+// - tcp_speed_server: 裸 TCP 协议（非 HTTP），浏览器 fetch 无法发送 SPEEDTEST 命令，天然免疫 DNS rebinding
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -5,25 +10,153 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use log::{error, info, warn};
+use once_cell::sync::Lazy;
+use tokio::sync::Mutex;
+
+// ===== 文件服务器（HTTP，用于文件下载测速）=====
+
+static FILE_SERVER_PORT: Lazy<Arc<AtomicU16>> = Lazy::new(|| Arc::new(AtomicU16::new(0)));
+static FILE_SERVER_RUNNING: Lazy<Arc<AtomicU16>> = Lazy::new(|| Arc::new(AtomicU16::new(0)));
+static FILE_SERVER_HANDLE: Lazy<Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(None)));
+
+const TEST_FILE_SIZE: usize = 10 * 1024 * 1024;
+
+/// 校验 HTTP Host header，防御 DNS rebinding 攻击。
+/// 浏览器 DNS rebinding 时 Host 会是攻击者域名，而非 127.0.0.1/localhost。
+fn is_valid_host(host_header: &str) -> bool {
+    // 去掉端口部分
+    let host = host_header.split(':').next().unwrap_or("").trim();
+    host == "127.0.0.1" || host == "localhost" || host.is_empty()
+}
+
+fn generate_test_file() -> Vec<u8> {
+    let mut data = Vec::with_capacity(TEST_FILE_SIZE);
+    for i in 0..TEST_FILE_SIZE {
+        data.push((i % 256) as u8);
+    }
+    data
+}
+
+#[tauri::command]
+pub async fn start_file_server() -> Result<u16, String> {
+    if FILE_SERVER_RUNNING.load(Ordering::SeqCst) == 1 {
+        return Ok(FILE_SERVER_PORT.load(Ordering::SeqCst));
+    }
+
+    let test_data = Arc::new(generate_test_file());
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to bind port: {}", e))?;
+
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local address: {}", e))?
+        .port();
+
+    FILE_SERVER_PORT.store(port, Ordering::SeqCst);
+    FILE_SERVER_RUNNING.store(1, Ordering::SeqCst);
+
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("Failed to set nonblocking: {}", e))?;
+
+    let running = Arc::new(AtomicU16::new(1));
+    let running_clone = running.clone();
+    let test_data_clone = test_data.clone();
+
+    let handle = tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+
+        loop {
+            if running_clone.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let data = test_data_clone.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+                    let mut buffer = [0u8; 1024];
+                    if let Ok(n) = stream.read(&mut buffer).await {
+                        if n > 0 {
+                            let request = String::from_utf8_lossy(&buffer[..n]);
+
+                            // DNS rebinding 防护：校验 Host header
+                            let host_valid = request
+                                .lines()
+                                .find_map(|line| {
+                                    let line = line.trim();
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("host:")
+                                        .map(|h| is_valid_host(h))
+                                })
+                                .unwrap_or(true); // 无 Host header 时放行（非浏览器请求）
+
+                            if !host_valid {
+                                let response =
+                                    "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
+                                let _ = stream.write_all(response.as_bytes()).await;
+                                return;
+                            }
+
+                            if request.starts_with("GET /test") {
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    data.len()
+                                );
+                                let _ = stream.write_all(response.as_bytes()).await;
+                                let _ = stream.write_all(&data).await;
+                            } else {
+                                let response =
+                                    "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+                                let _ = stream.write_all(response.as_bytes()).await;
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    });
+
+    *FILE_SERVER_HANDLE.lock().await = Some(handle);
+    Ok(port)
+}
+
+#[tauri::command]
+pub async fn stop_file_server() -> Result<(), String> {
+    FILE_SERVER_RUNNING.store(0, Ordering::SeqCst);
+    if let Some(handle) = FILE_SERVER_HANDLE.lock().await.take() {
+        handle.abort();
+    }
+    FILE_SERVER_PORT.store(0, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_file_server_port() -> u16 {
+    FILE_SERVER_PORT.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+pub fn is_file_server_running() -> bool {
+    FILE_SERVER_RUNNING.load(Ordering::SeqCst) == 1
+}
+
+// ===== TCP 测速服务器（裸 TCP 协议）=====
 
 static TCP_SPEED_SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
 static TCP_SPEED_SERVER_PORT: AtomicU16 = AtomicU16::new(0);
 
-/// 单次发送的测试数据块大小（1MB）
 const TEST_DATA_SIZE: usize = 1024 * 1024;
-/// socket 收发缓冲区大小（2MB，提升大带宽链路利用率）
 const SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
-/// 客户端读取缓冲区大小（256KB，减少系统调用次数）
 const CLIENT_READ_BUF_SIZE: usize = 256 * 1024;
-/// accept 轮询间隔（10ms，降低连接建立延迟）
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// 调优 socket：禁用 Nagle 算法并增大收发缓冲区
 fn tune_socket(stream: &TcpStream) -> Result<(), std::io::Error> {
-    // 禁用 Nagle 算法，避免小请求行被延迟发送
     stream.set_nodelay(true)?;
-    // 通过 socket2 的 SockRef 借用底层 socket，安全地设置缓冲区大小
-    // SockRef 是对 socket 的引用，不会接管所有权，无需手动释放
     let sock = socket2::SockRef::from(stream);
     let _ = sock.set_recv_buffer_size(SOCKET_BUF_SIZE);
     let _ = sock.set_send_buffer_size(SOCKET_BUF_SIZE);
@@ -55,24 +188,19 @@ pub async fn start_tcp_speed_server() -> Result<u16, String> {
     let running_clone = running.clone();
 
     thread::spawn(move || {
-        // 预先生成测试数据块，避免每次连接重复分配
         let test_data = vec![0u8; TEST_DATA_SIZE];
 
         while TCP_SPEED_SERVER_RUNNING.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, addr)) => {
                     info!("TCP speed server accepted connection from {}", addr);
-
-                    // 调优 socket 参数
                     if let Err(e) = tune_socket(&stream) {
                         warn!("Tune server socket failed: {}", e);
                     }
-
                     let test_data = test_data.clone();
                     let running = running_clone.clone();
-
                     thread::spawn(move || {
-                        if let Err(e) = handle_client(stream, &test_data, running) {
+                        if let Err(e) = handle_tcp_client(stream, &test_data, running) {
                             error!("Client handler error: {}", e);
                         }
                     });
@@ -93,7 +221,7 @@ pub async fn start_tcp_speed_server() -> Result<u16, String> {
     Ok(port)
 }
 
-fn handle_client(
+fn handle_tcp_client(
     mut stream: TcpStream,
     test_data: &[u8],
     running: Arc<AtomicBool>,
@@ -109,14 +237,9 @@ fn handle_client(
         }
 
         match stream.read(&mut buffer) {
-            Ok(0) => {
-                info!("Client disconnected");
-                break;
-            }
+            Ok(0) => break,
             Ok(n) => {
                 let request = String::from_utf8_lossy(&buffer[..n]);
-                info!("Received request: {}", request.trim());
-
                 if request.starts_with("SPEEDTEST") {
                     let parts: Vec<&str> = request.split_whitespace().collect();
                     let size_mb: usize = if parts.len() > 1 {
@@ -126,7 +249,6 @@ fn handle_client(
                     };
 
                     info!("Sending {} MB for speed test", size_mb);
-
                     let total_bytes = size_mb * 1024 * 1024;
                     let mut sent = 0usize;
 
@@ -135,8 +257,6 @@ fn handle_client(
                         stream.write_all(&test_data[..to_send])?;
                         sent += to_send;
                     }
-
-                    info!("Speed test data sent: {} bytes", sent);
                     break;
                 }
             }
@@ -146,7 +266,6 @@ fn handle_client(
                 {
                     continue;
                 }
-                error!("Read error: {}", e);
                 break;
             }
         }
@@ -158,11 +277,8 @@ fn handle_client(
 #[tauri::command]
 pub async fn check_tcp_speed_server(port: u16) -> Result<bool, String> {
     info!("Checking TCP speed server on port {}", port);
-
     let result = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        let addr = format!("127.0.0.1:{}", port);
-
-        let socket_addr = addr
+        let socket_addr = format!("127.0.0.1:{}", port)
             .parse::<std::net::SocketAddr>()
             .map_err(|e: std::net::AddrParseError| format!("地址解析失败: {}", e))?;
 
@@ -175,39 +291,21 @@ pub async fn check_tcp_speed_server(port: u16) -> Result<bool, String> {
                     .set_write_timeout(Some(Duration::from_secs(3)))
                     .map_err(|e| format!("设置写超时失败: {}", e))?;
 
-                let request = "PING\n";
-                if let Err(e) = stream.write_all(request.as_bytes()) {
+                if let Err(e) = stream.write_all(b"PING\n") {
                     info!("TCP server check write failed: {}", e);
                     return Ok(false);
                 }
 
                 let mut buf = [0u8; 64];
                 match stream.read(&mut buf) {
-                    Ok(0) => {
-                        info!("TCP server check: server closed connection (normal for PING)");
-                        Ok(true)
-                    }
-                    Ok(n) => {
-                        info!("TCP server check: received {} bytes", n);
-                        Ok(true)
-                    }
+                    Ok(_) => Ok(true),
                     Err(e) => {
-                        if e.kind() == std::io::ErrorKind::TimedOut
-                            || e.kind() == std::io::ErrorKind::WouldBlock
-                        {
-                            info!("TCP server check: timeout (server is listening)");
-                            Ok(true)
-                        } else {
-                            info!("TCP server check read error: {}", e);
-                            Ok(false)
-                        }
+                        Ok(e.kind() == std::io::ErrorKind::TimedOut
+                            || e.kind() == std::io::ErrorKind::WouldBlock)
                     }
                 }
             }
-            Err(e) => {
-                info!("TCP server check connect failed: {}", e);
-                Ok(false)
-            }
+            Err(_) => Ok(false),
         }
     })
     .await
@@ -241,46 +339,26 @@ pub async fn tcp_speed_test(
     size_mb: Option<usize>,
 ) -> Result<SpeedTestResult, String> {
     let size_mb = size_mb.unwrap_or(10);
+    info!("Starting TCP speed test to {}:{} for {} MB", host, port, size_mb);
 
-    info!(
-        "Starting TCP speed test to {}:{} for {} MB",
-        host, port, size_mb
-    );
-
-    if host.is_empty() {
+    if host.is_empty() || port == 0 {
         return Ok(SpeedTestResult {
             success: false,
             speed_mbps: 0.0,
             total_bytes: 0,
             duration_ms: 0,
-            error: Some("Host is empty".to_string()),
-        });
-    }
-
-    if port == 0 {
-        return Ok(SpeedTestResult {
-            success: false,
-            speed_mbps: 0.0,
-            total_bytes: 0,
-            duration_ms: 0,
-            error: Some("Port is 0".to_string()),
+            error: Some(if host.is_empty() { "Host is empty".into() } else { "Port is 0".into() }),
         });
     }
 
     tokio::task::spawn_blocking(move || {
         let start = Instant::now();
-
         let addr_str = format!("{}:{}", host, port);
-        info!("Attempting to resolve address: {}", addr_str);
 
         let socket_addr = match addr_str.to_socket_addrs() {
             Ok(mut addrs) => match addrs.next() {
-                Some(addr) => {
-                    info!("Resolved {} to {}", addr_str, addr);
-                    addr
-                }
+                Some(addr) => addr,
                 None => {
-                    error!("No addresses found for {}", addr_str);
                     return Ok(SpeedTestResult {
                         success: false,
                         speed_mbps: 0.0,
@@ -291,7 +369,6 @@ pub async fn tcp_speed_test(
                 }
             },
             Err(e) => {
-                error!("Failed to parse address '{}': {}", addr_str, e);
                 return Ok(SpeedTestResult {
                     success: false,
                     speed_mbps: 0.0,
@@ -315,11 +392,9 @@ pub async fn tcp_speed_test(
             }
         };
 
-        // 调优客户端 socket：禁用 Nagle、增大收发缓冲区
         if let Err(e) = tune_socket(&stream) {
             warn!("Tune client socket failed: {}", e);
         }
-        // 设置读超时，避免服务端异常时永久阻塞（60 秒足够完成大文件传输）
         let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
 
         let request = format!("SPEEDTEST {}\n", size_mb);
@@ -334,18 +409,14 @@ pub async fn tcp_speed_test(
         }
 
         let mut received = 0u64;
-        // 使用 256KB 大缓冲区读取，减少系统调用次数，提升吞吐
         let mut buffer = vec![0u8; CLIENT_READ_BUF_SIZE];
 
         loop {
             match stream.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(n) => {
-                    received += n as u64;
-                }
+                Ok(n) => received += n as u64,
                 Err(e) => {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
-                        warn!("Read error during speed test: {}", e);
                         break;
                     }
                 }

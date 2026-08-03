@@ -116,9 +116,30 @@ export function AboutSection({ currentVersion }: AboutSectionProps) {
           </ItemActions>
         </Item>
       </div>
-      <p className="text-[11px] text-muted-foreground text-center pt-1">
-        本工具为社区开源项目，与 ChmlFrp 官方无隶属关系
-      </p>
+      <div className="space-y-1 pt-1 text-center">
+        <p className="text-[11px] text-muted-foreground">
+          本工具为社区开源项目，与 ChmlFrp 官方无隶属关系
+        </p>
+        <p className="text-[11px] text-muted-foreground/80">
+          UI 设计基于{" "}
+          <button
+            type="button"
+            onClick={() => void openUrl("https://github.com/TechCat-Team/ChmlFrpLauncher")}
+            className="text-foreground/80 hover:text-primary transition-colors"
+          >
+            ChmlFrpLauncher
+          </button>
+          ，功能由{" "}
+          <button
+            type="button"
+            onClick={() => void openUrl("https://github.com/zhengddzz")}
+            className="font-medium text-foreground/80 hover:text-primary transition-colors"
+          >
+            zhengddzz
+          </button>{" "}
+          开发
+        </p>
+      </div>
     </div>
   );
 }

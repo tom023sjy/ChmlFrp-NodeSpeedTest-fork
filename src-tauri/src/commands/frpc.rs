@@ -3,33 +3,41 @@ use crate::utils::{resolve_frpc_path, get_app_data_dir};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use tauri::State;
-use log::{info, warn, error};
+use log::{info, warn};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-fn generate_config_file(config: &SpeedTestConfig, app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let data_dir = get_app_data_dir(app_handle)?;
+/// 校验 INI 配置值，防止注入攻击。
+/// 拒绝包含换行符、回车符、方括号、等号、null 字节的值，
+/// 避免攻击者通过 tunnel_name/server_addr 等字段注入额外配置项。
+fn validate_ini_value(value: &str, field_name: &str) -> Result<(), String> {
+    if value.contains(['\n', '\r', '[', ']', '=', '\0']) {
+        return Err(format!(
+            "字段 {} 包含非法字符（换行/方括号/等号/null），可能存在配置注入风险",
+            field_name
+        ));
+    }
+    Ok(())
+}
 
+/// 生成 frpc 配置文件，所有字段先校验再拼接
+fn generate_config_file(
+    config: &SpeedTestConfig,
+    app_handle: &tauri::AppHandle,
+) -> Result<std::path::PathBuf, String> {
+    // 校验所有用户可控字段
+    validate_ini_value(&config.server_addr, "server_addr")?;
+    validate_ini_value(&config.user, "user")?;
+    validate_ini_value(&config.token, "token")?;
+    validate_ini_value(&config.tunnel_name, "tunnel_name")?;
+    validate_ini_value(&config.local_ip, "local_ip")?;
+
+    let data_dir = get_app_data_dir(app_handle)?;
     let config_path = data_dir.join("speedtest_frpc.ini");
 
     let config_content = format!(
-        r#"[common]
-server_addr = {}
-server_port = {}
-user = {}
-token = {}
-log_level = info
-tls_enable = false
-tcp_mux = true
-pool_count = 5
-
-[{}]
-type = tcp
-local_ip = {}
-local_port = {}
-remote_port = {}
-"#,
+        "[common]\nserver_addr = {}\nserver_port = {}\nuser = {}\ntoken = {}\nlog_level = info\ntls_enable = false\ntcp_mux = true\npool_count = 5\n\n[{}]\ntype = tcp\nlocal_ip = {}\nlocal_port = {}\nremote_port = {}\n",
         config.server_addr,
         config.server_port,
         config.user,
@@ -42,7 +50,6 @@ remote_port = {}
 
     let mut file = std::fs::File::create(&config_path)
         .map_err(|e| format!("创建配置文件失败: {}", e))?;
-
     file.write_all(config_content.as_bytes())
         .map_err(|e| format!("写入配置文件失败: {}", e))?;
 
@@ -56,31 +63,23 @@ pub async fn start_frpc(
     processes: State<'_, FrpcProcesses>,
 ) -> Result<(), String> {
     let tunnel_name = config.tunnel_name.clone();
-    
     info!("[Frpc] Starting frpc for tunnel: {}", tunnel_name);
-    info!("[Frpc] Config: server={}, port={}, local_port={}, remote_port={}", 
-          config.server_addr, config.server_port, config.local_port, config.remote_port);
-    
+
     {
         let procs = processes
             .processes
             .lock()
             .map_err(|e| format!("获取进程锁失败: {}", e))?;
         if procs.contains_key(&tunnel_name) {
-            warn!("[Frpc] frpc already running for tunnel: {}", tunnel_name);
             return Err("frpc 已在运行中".to_string());
         }
     }
-    
+
     let frpc_path = resolve_frpc_path(&app_handle)?;
-    
     if !frpc_path.exists() {
-        error!("[Frpc] frpc not found at: {:?}", frpc_path);
         return Err("frpc 未找到，请先下载".to_string());
     }
-    
-    info!("[Frpc] Using frpc at: {:?}", frpc_path);
-    
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -91,9 +90,8 @@ pub async fn start_frpc(
             std::fs::set_permissions(&frpc_path, perms).map_err(|e| e.to_string())?;
         }
     }
-    
+
     let config_path = generate_config_file(&config, &app_handle)?;
-    info!("[Frpc] Config file created at: {:?}", config_path);
 
     let mut cmd = Command::new(&frpc_path);
     cmd.arg("-c")
@@ -106,11 +104,7 @@ pub async fn start_frpc(
         cmd.creation_flags(0x08000000);
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
-        error!("[Frpc] Failed to spawn frpc: {}", e);
-        format!("启动 frpc 失败: {}", e)
-    })?;
-
+    let mut child = cmd.spawn().map_err(|e| format!("启动 frpc 失败: {}", e))?;
     let pid = child.id();
     info!("[Frpc] frpc process spawned with PID: {:?}", pid);
 
@@ -141,8 +135,6 @@ pub async fn start_frpc(
     }
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-    info!("[Frpc] frpc startup wait completed");
     Ok(())
 }
 
@@ -155,29 +147,23 @@ pub async fn stop_frpc(
         .processes
         .lock()
         .map_err(|e| format!("获取进程锁失败: {}", e))?;
-    
     if let Some(mut child) = procs.remove(&tunnel_name) {
         let _ = child.kill();
         let _ = child.wait();
     }
-    
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_all_frpc(
-    processes: State<'_, FrpcProcesses>,
-) -> Result<(), String> {
+pub async fn stop_all_frpc(processes: State<'_, FrpcProcesses>) -> Result<(), String> {
     let mut procs = processes
         .processes
         .lock()
         .map_err(|e| format!("获取进程锁失败: {}", e))?;
-    
     for (_, mut child) in procs.drain() {
         let _ = child.kill();
         let _ = child.wait();
     }
-    
     Ok(())
 }
 

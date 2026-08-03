@@ -57,6 +57,23 @@ interface TestHistory {
   timestamp: number;
 }
 
+/**
+ * 计算节点推荐值（0-100 分，保留两位小数）。
+ * 算法：速度得分（权重 60%）+ 延迟得分（权重 40%）
+ * - 速度得分：以 100Mbps 为满分基准线性归一化，超过 100Mbps 记 100 分
+ * - 延迟得分：100 - 延迟(ms) × 0.2，低于 0 记 0 分（即 500ms 得 0 分）
+ * - 未测试或测试失败的节点返回 null（不显示分数）
+ */
+function calcRecommendScore(node: NodeWithTest): number | null {
+  if (node.testStatus !== "success" || node.latency == null || node.downloadSpeed == null) {
+    return null;
+  }
+  const speedScore = Math.min(node.downloadSpeed / 100, 1) * 100;
+  const latencyScore = Math.max(0, 100 - node.latency * 0.2);
+  const score = speedScore * 0.6 + latencyScore * 0.4;
+  return Math.round(score * 100) / 100;
+}
+
 type UserTypeFilter = "all" | "vip" | "normal";
 type RegionFilter = "all" | "domestic" | "foreign";
 
@@ -420,6 +437,10 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
       const aSpeed = a.downloadSpeed ?? (sortDirection === "asc" ? Infinity : -1);
       const bSpeed = b.downloadSpeed ?? (sortDirection === "asc" ? Infinity : -1);
       return sortDirection === "asc" ? aSpeed - bSpeed : bSpeed - aSpeed;
+    } else if (sortField === "recommendScore") {
+      const aScore = calcRecommendScore(a) ?? (sortDirection === "asc" ? Infinity : -1);
+      const bScore = calcRecommendScore(b) ?? (sortDirection === "asc" ? Infinity : -1);
+      return sortDirection === "asc" ? aScore - bScore : bScore - aScore;
     }
     return 0;
   });
@@ -783,7 +804,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
       ) : (
         <div className="flex-1 min-h-0">
           <div className={cn(
-            "h-scroll-outer h-full max-h-full rounded-md border bg-card overflow-x-scroll overflow-y-auto visible-scrollbar",
+            "h-scroll-outer h-full max-h-full rounded-md border bg-card overflow-x-auto overflow-y-auto visible-scrollbar",
             effectType === "frosted" && "backdrop-blur-md bg-card/80",
             effectType === "translucent" && "bg-card/80",
           )}>
@@ -858,6 +879,24 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
             )}
           </button>
         </TableHead>
+        <TableHead className="min-w-[88px]">
+          <button
+            onClick={() => handleSort("recommendScore")}
+            className="flex items-center gap-1 hover:text-foreground transition-colors"
+            title="基于带宽速度（60%）和延迟（40%）加权计算"
+          >
+            推荐值
+            {sortField === "recommendScore" ? (
+              sortDirection === "asc" ? (
+                <ArrowUp className="w-3 h-3" />
+              ) : (
+                <ArrowDown className="w-3 h-3" />
+              )
+            ) : (
+              <ArrowUpDown className="w-3 h-3 opacity-50" />
+            )}
+          </button>
+        </TableHead>
         {/* 操作列已注释：节点右侧测试按钮与顶部测试组件存在显示差异，暂时隐藏
         <TableHead className="text-right">操作</TableHead>
         */}
@@ -918,7 +957,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
                     </TableCell>
                     <TableCell>
                       {node.downloadSpeed != null ? (
-                        <span 
+                        <span
                           className="flex items-center gap-1 cursor-pointer hover:text-primary transition-colors"
                           onClick={() => setHistoryNode({ node, type: "speed" })}
                           title="点击查看速度历史"
@@ -931,6 +970,30 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
                       ) : (
                         <span className="text-muted-foreground">-</span>
                       )}
+                    </TableCell>
+                    <TableCell className="min-w-[88px]">
+                      {(() => {
+                        const score = calcRecommendScore(node);
+                        if (score == null) {
+                          return <span className="text-muted-foreground">-</span>;
+                        }
+                        const color =
+                          score >= 80
+                            ? "text-green-600 dark:text-green-400"
+                            : score >= 60
+                              ? "text-blue-600 dark:text-blue-400"
+                              : score >= 40
+                                ? "text-yellow-600 dark:text-yellow-400"
+                                : "text-red-600 dark:text-red-400";
+                        return (
+                          <span
+                            className={cn("font-medium tabular-nums", color)}
+                            title="基于带宽速度（60%）和延迟（40%）加权计算"
+                          >
+                            {score.toFixed(2)}
+                          </span>
+                        );
+                      })()}
                     </TableCell>
                     {/* 节点右侧测试按钮已注释：与顶部测试组件存在显示差异（条形图/折线图不显示），暂时隐藏
                     <TableCell className="text-right">
