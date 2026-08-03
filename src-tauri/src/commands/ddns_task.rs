@@ -260,6 +260,7 @@ pub fn append_log(app_handle: &AppHandle, mut log: DdnsLog) {
     }
 }
 
+#[allow(dead_code)]
 pub fn gen_id() -> String {
     format!(
         "{:x}{:x}",
@@ -269,6 +270,7 @@ pub fn gen_id() -> String {
 }
 
 /// 简单伪随机（不引入 rand crate）
+#[allow(dead_code)]
 fn rand_u32() -> u32 {
     use std::time::SystemTime;
     let nanos = SystemTime::now()
@@ -289,6 +291,7 @@ pub fn parse_local_time(s: &str) -> Option<DateTime<Local>> {
 }
 
 /// UTC 时间转本地时间字符串（用于调度器比较）
+#[allow(dead_code)]
 pub fn utc_to_local_string(utc: DateTime<Utc>) -> String {
     utc.with_timezone(&Local).to_rfc3339()
 }

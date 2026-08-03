@@ -46,8 +46,9 @@ where
 }
 
 /// /tunnel 接口单条隧道响应
-/// tunnelState 使用自定义反序列化兼容布尔/整数/字符串/空值格式
+/// tunnel_state 使用自定义反序列化兼容布尔/整数/字符串/空值格式
 #[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
 struct TunnelInfo {
     /// API 可能返回 name 或 tunnelName
     #[serde(alias = "tunnelName")]
@@ -60,18 +61,20 @@ struct TunnelInfo {
     #[serde(default)]
     ip: String,
     /// API 返回的隧道状态字段，可能是 state / tunnelState / tunnel_state，值为字符串 "true"/"false"
-    #[serde(default, alias = "state", alias = "tunnel_state", deserialize_with = "deserialize_tunnel_state")]
-    tunnelState: Option<bool>,
+    #[serde(default, alias = "state", alias = "tunnelState", deserialize_with = "deserialize_tunnel_state")]
+    tunnel_state: Option<bool>,
     /// 隧道远程端口，tcping 检测时使用
     #[serde(default, alias = "remotePort")]
     remote_port: u32,
 }
 
 /// 调度器全局句柄（用于启动/停止）
+#[allow(dead_code)]
 pub struct DnsMonitorHandle {
     stop_flag: Arc<TokioMutex<bool>>,
 }
 
+#[allow(dead_code)]
 impl DnsMonitorHandle {
     pub fn new() -> Self {
         Self {
@@ -203,12 +206,12 @@ async fn check_single_task(
 
     // 调试日志：输出隧道匹配和健康状态
     log::info!(
-        "[DNS-Monitor] 任务「{}」: 隧道总数={}, 主隧道={} 匹配={} tunnelState={:?} 健康={}",
+        "[DNS-Monitor] 任务「{}」: 隧道总数={}, 主隧道={} 匹配={} tunnel_state={:?} 健康={}",
         task.name,
         tunnels.len(),
         task.primary_tunnel.tunnel_name,
         primary.is_some(),
-        primary.map(|t| t.tunnelState).flatten(),
+        primary.map(|t| t.tunnel_state).flatten(),
         primary_ok
     );
 
@@ -263,9 +266,9 @@ async fn check_single_task(
                             task.tcping_timeout_secs,
                         ).await;
                         log::info!(
-                            "[DNS-Monitor] 备用「{}」: 已匹配, tunnelState={:?}, nodestate={}, 健康={}",
-                            b.tunnel_name,
-                            t.tunnelState,
+                            "[DNS-Monitor] 备用「{}」: 已匹配, tunnel_state={:?}, nodestate={}, 健康={}",
+                            t.name,
+                            t.tunnel_state,
                             t.nodestate,
                             backup_ok
                         );
@@ -424,8 +427,8 @@ async fn is_tunnel_healthy(
     for m in methods {
         let (passed, detail) = match m.as_str() {
             "tunnel_state" => {
-                let ok = t.tunnelState != Some(false);
-                (ok, format!("tunnelState={:?}→{}", t.tunnelState, if ok { "通过" } else { "不通过" }))
+                let ok = t.tunnel_state != Some(false);
+                (ok, format!("tunnel_state={:?}→{}", t.tunnel_state, if ok { "通过" } else { "不通过" }))
             }
             "node_state" => {
                 let ok = !t.nodestate.eq_ignore_ascii_case("offline");

@@ -45,6 +45,8 @@ pub fn run() {
                         eprintln!("Failed to set window title: {:?}", e);
                     }
                 }
+                // 非 macOS/Windows 平台下 window 不会被读取，显式标记避免警告
+                let _ = &window;
 
                 #[cfg(target_os = "windows")]
                 {

@@ -4,6 +4,7 @@ use std::process::Child;
 use std::sync::Mutex;
 
 #[derive(Serialize, Clone)]
+#[allow(dead_code)]
 pub struct LogMessage {
     pub message: String,
     pub timestamp: String,
@@ -34,12 +35,14 @@ pub struct FrpcInfoResponse {
 }
 
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)]
 pub struct FrpcInfoData {
     pub downloads: Vec<FrpcDownload>,
     pub version: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
 pub struct FrpcDownload {
     pub hash: String,
     pub os: String,
@@ -84,6 +87,7 @@ pub struct SpeedTestConfig {
 
 /// 更新 API 完整响应
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)]
 pub struct AppUpdateResponse {
     pub id: String,
     pub name: String,
@@ -111,6 +115,7 @@ pub struct AppUpdatePlatforms {
 
 /// 单个安装包信息
 #[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
 pub struct AppUpdatePackage {
     pub version: String,
     pub url: String,
@@ -125,6 +130,7 @@ pub struct AppUpdatePackage {
 
 /// 历史版本条目
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)]
 pub struct AppUpdateChangelogEntry {
     pub version: String,
     #[serde(rename = "releaseDate")]
