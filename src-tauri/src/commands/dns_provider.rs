@@ -1497,7 +1497,8 @@ pub mod chmlfrp {
 
     /// 实现高层接口：确保子域名指向指定 CNAME 值
     /// 存在则 update_free_subdomain，不存在则 create_free_subdomain
-    /// 容灾切换场景固定使用 CNAME 类型，TTL 用较快的 "1分钟" 提升切换生效速度
+    /// 容灾切换场景固定使用 CNAME 类型，TTL 使用 ChmlFrp API 允许的最小值 "10分钟"
+    /// （API 限制：TTL 最少 10 分钟，低于该值返回 400 错误）
     pub async fn upsert_record(
         cred: &DnsCredential,
         domain: &str,
@@ -1518,12 +1519,12 @@ pub mod chmlfrp {
             // ChmlFrp update 接口不支持修改记录类型，类型不匹配时需先删除再创建
             if !rec.record_type.eq_ignore_ascii_case(record_type) {
                 delete_free_subdomain(cred, domain, subdomain).await?;
-                create_free_subdomain(cred, domain, subdomain, record_type, value, "1分钟", remarks).await?;
+                create_free_subdomain(cred, domain, subdomain, record_type, value, "10分钟", remarks).await?;
             } else {
-                update_free_subdomain(cred, domain, subdomain, value, "1分钟", remarks).await?;
+                update_free_subdomain(cred, domain, subdomain, value, "10分钟", remarks).await?;
             }
         } else {
-            create_free_subdomain(cred, domain, subdomain, record_type, value, "1分钟", remarks).await?;
+            create_free_subdomain(cred, domain, subdomain, record_type, value, "10分钟", remarks).await?;
         }
         Ok(())
     }
@@ -1546,12 +1547,12 @@ pub mod chmlfrp {
             }
             if !rec.record_type.eq_ignore_ascii_case(record_type) {
                 delete_free_subdomain(cred, domain, subdomain).await?;
-                create_free_subdomain(cred, domain, subdomain, record_type, value, "1分钟", remarks).await?;
+                create_free_subdomain(cred, domain, subdomain, record_type, value, "10分钟", remarks).await?;
             } else {
-                update_free_subdomain(cred, domain, subdomain, value, "1分钟", remarks).await?;
+                update_free_subdomain(cred, domain, subdomain, value, "10分钟", remarks).await?;
             }
         } else {
-            create_free_subdomain(cred, domain, subdomain, record_type, value, "1分钟", remarks).await?;
+            create_free_subdomain(cred, domain, subdomain, record_type, value, "10分钟", remarks).await?;
         }
         Ok(())
     }
