@@ -580,7 +580,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
   // 2. autoColumnWidths（根据内容动态测量的默认列宽）
   // 3. defaultSize（静态默认列宽，作为兜底）
   // TanStack 的 column.getSize() 自动合并：columnSizing[id] ?? columnDef.size
-  const columns = useMemo<ColumnDef<typeof features, NodeWithTest>[]>(() => {
+  const columns = useMemo(() => {
     const getSize = (id: string, defaultSize: number, minSize: number) => {
       const measured = autoColumnWidths[id];
       if (measured != null) return Math.max(measured, minSize);
@@ -665,7 +665,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
           return a - b;
         },
       }),
-    ];
+    ] as ColumnDef<typeof features, NodeWithTest>[];
   }, [autoColumnWidths]);
 
   // ===== 创建 TanStack Table 实例 =====
