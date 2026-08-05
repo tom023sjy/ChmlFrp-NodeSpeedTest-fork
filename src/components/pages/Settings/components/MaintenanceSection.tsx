@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Trash2, Loader2, FileText, Database, ScrollText } from "lucide-react";
+import { Trash2, Loader2, FileText, Database, ScrollText, Columns3 } from "lucide-react";
 import {
   Item,
   ItemContent,
@@ -29,6 +29,10 @@ const CLEAN_CACHE_BETA_TITLE =
 const CLEAN_LOGS_BETA_TITLE =
   "Beta 测试功能：此功能仍在测试阶段，将清空 DNS 容灾、DDNS 解析、SSL 证书申请的历史日志，删除后不可恢复，请谨慎使用。";
 
+/** 重置列宽的提示文案 */
+const RESET_COLUMN_WIDTHS_TITLE =
+  "将清除节点测试表格的自定义列宽配置，恢复为根据内容自动计算的默认宽度。";
+
 // 临时隧道名称前缀（与 tunnelService.createTempTunnel 中保持一致）
 const TEMP_TUNNEL_PREFIX = "speedtest";
 
@@ -40,12 +44,16 @@ const NODE_CACHE_KEYS = [
   "node_udp_cache",
 ] as const;
 
+/** 节点测试列宽配置的 localStorage 键前缀（含账号隔离键与旧版全局键） */
+const COLUMN_WIDTHS_CACHE_KEY = "node_column_widths";
+
 export function MaintenanceSection() {
   const confirm = useConfirm();
   const [cleaning, setCleaning] = useState(false);
   const [showCleanTxt, setShowCleanTxt] = useState(false);
   const [cleaningCache, setCleaningCache] = useState(false);
   const [cleaningLogs, setCleaningLogs] = useState(false);
+  const [resettingWidths, setResettingWidths] = useState(false);
 
   const handleCleanTempTunnels = async () => {
     const user = getStoredUser();
@@ -167,6 +175,38 @@ export function MaintenanceSection() {
       toast.error(e instanceof Error ? e.message : "清理日志失败");
     } finally {
       setCleaningLogs(false);
+    }
+  };
+
+  /** 重置列宽：清除节点测试表格的自定义列宽配置，恢复为动态默认宽度 */
+  const handleResetColumnWidths = async () => {
+    if (resettingWidths) return;
+
+    const user = getStoredUser();
+    const username = user?.username || "";
+
+    const confirmed = await confirm({
+      title: "重置列宽",
+      description: RESET_COLUMN_WIDTHS_TITLE,
+      confirmText: "重置",
+      variant: "destructive",
+    });
+    if (!confirmed) return;
+
+    setResettingWidths(true);
+    try {
+      // 清除账号隔离键（格式：key__username）和旧版全局键
+      if (username) {
+        localStorage.removeItem(`${COLUMN_WIDTHS_CACHE_KEY}__${username}`);
+      }
+      localStorage.removeItem(COLUMN_WIDTHS_CACHE_KEY);
+      // 通知 NodeTest 组件清空内存中的自定义列宽状态
+      window.dispatchEvent(new CustomEvent("node-column-widths-reset"));
+      toast.success("已重置列宽配置");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "重置列宽失败");
+    } finally {
+      setResettingWidths(false);
     }
   };
 
@@ -300,6 +340,36 @@ export function MaintenanceSection() {
                 <>
                   <ScrollText className="w-3 h-3" />
                   清理
+                </>
+              )}
+            </Button>
+          </ItemActions>
+        </Item>
+
+        <Item variant="outline" className="border-0 border-t border-border/40">
+          <ItemContent>
+            <ItemTitle>重置节点测试列宽</ItemTitle>
+            <ItemDescription className="text-xs">
+              清除节点测试表格的自定义列宽配置，恢复为根据内容自动计算的默认宽度
+            </ItemDescription>
+          </ItemContent>
+          <ItemActions>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={resettingWidths}
+              onClick={handleResetColumnWidths}
+              className="h-auto px-3 py-1.5 text-xs gap-1.5"
+            >
+              {resettingWidths ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  重置中...
+                </>
+              ) : (
+                <>
+                  <Columns3 className="w-3 h-3" />
+                  重置
                 </>
               )}
             </Button>

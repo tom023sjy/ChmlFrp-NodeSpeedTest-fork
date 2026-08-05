@@ -159,3 +159,36 @@ body:has(.translucent-enabled) [data-slot="context-menu-sub-content"] {
 .dark .translucent-enabled .bg-card\/95.backdrop-blur-md {
   background: rgba(15, 16, 20, 0.75) !important;
 }
+
+/* 节点测试表格 sticky 表头：锁定为悬浮态样式，hover 时不变化颜色 */
+/* 容器（.thead-locked）保留卡片背景（含毛玻璃/半透明），不覆盖背景色 */
+
+/* sticky 表头行：普通模式使用 muted 色调（与行悬浮态一致）*/
+.thead-locked [data-slot="table-header"] [data-slot="table-row"],
+.thead-locked [data-slot="table-header"] [data-slot="table-row"]:hover {
+  background-color: var(--muted) !important;
+}
+
+/* sticky 表头行：毛玻璃模式保留磨砂质感，背景为 muted 色调半透明版本 */
+.frosted-glass-enabled .thead-locked [data-slot="table-header"] [data-slot="table-row"],
+.frosted-glass-enabled .thead-locked [data-slot="table-header"] [data-slot="table-row"]:hover {
+  background-color: rgba(236, 238, 242, 0.8) !important;
+  backdrop-filter: blur(24px) saturate(200%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(200%) !important;
+}
+.dark .frosted-glass-enabled .thead-locked [data-slot="table-header"] [data-slot="table-row"],
+.dark .frosted-glass-enabled .thead-locked [data-slot="table-header"] [data-slot="table-row"]:hover {
+  background-color: rgba(19, 21, 27, 0.8) !important;
+  backdrop-filter: blur(24px) saturate(200%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(200%) !important;
+}
+
+/* sticky 表头行：半透明模式使用 muted 色调半透明版本 */
+.translucent-enabled .thead-locked [data-slot="table-header"] [data-slot="table-row"],
+.translucent-enabled .thead-locked [data-slot="table-header"] [data-slot="table-row"]:hover {
+  background-color: rgba(236, 238, 242, 0.8) !important;
+}
+.dark .translucent-enabled .thead-locked [data-slot="table-header"] [data-slot="table-row"],
+.dark .translucent-enabled .thead-locked [data-slot="table-header"] [data-slot="table-row"]:hover {
+  background-color: rgba(19, 21, 27, 0.8) !important;
+}

@@ -1,4 +1,17 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  useTable,
+  tableFeatures,
+  createColumnHelper,
+  createSortedRowModel,
+  rowSortingFeature,
+  columnSizingFeature,
+  columnResizingFeature,
+  type ColumnDef,
+  type SortingState,
+  type ColumnSizingState,
+  type Header,
+} from "@tanstack/react-table";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -89,6 +102,47 @@ const userTypeOptions = [
   { value: "normal", label: "普通" },
 ];
 
+// ===== TanStack Table v9 Feature 注册 =====
+// 排序 + 列宽调整 + 列宽拖拽交互
+const features = tableFeatures({
+  rowSortingFeature,
+  sortedRowModel: createSortedRowModel(),
+  columnSizingFeature,
+  columnResizingFeature,
+});
+
+const columnHelper = createColumnHelper<typeof features, NodeWithTest>();
+
+/**
+ * 列配置常量（用于动态列宽测量和列定义）
+ * - id: 列标识（与 TanStack column id 一致）
+ * - defaultSize: 静态默认列宽（px）
+ * - minSize: 最小列宽（px），防止列被压缩到无法显示
+ * - enableSorting: 是否允许排序
+ */
+interface ColumnConfig {
+  id: string;
+  defaultSize: number;
+  minSize: number;
+  enableSorting: boolean;
+}
+
+const COLUMN_CONFIG: ColumnConfig[] = [
+  { id: "select", defaultSize: 48, minSize: 36, enableSorting: false },
+  { id: "id", defaultSize: 64, minSize: 48, enableSorting: true },
+  { id: "name", defaultSize: 180, minSize: 80, enableSorting: false },
+  { id: "area", defaultSize: 140, minSize: 60, enableSorting: false },
+  { id: "nodegroup", defaultSize: 80, minSize: 64, enableSorting: false },
+  { id: "china", defaultSize: 80, minSize: 64, enableSorting: false },
+  { id: "status", defaultSize: 96, minSize: 80, enableSorting: false },
+  { id: "latency", defaultSize: 80, minSize: 64, enableSorting: true },
+  { id: "downloadSpeed", defaultSize: 96, minSize: 80, enableSorting: true },
+  { id: "recommendScore", defaultSize: 88, minSize: 72, enableSorting: true },
+];
+
+// 列宽缓存 key（按账号隔离）
+const COLUMN_SIZING_CACHE_KEY = "node_column_widths";
+
 export function NodeTest({ user, onTestingChange }: NodeTestProps) {
   // 按账号隔离的本地缓存 key
   // 旧数据（无后缀）首次访问时自动迁移到当前账号名下
@@ -152,8 +206,6 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
   const [effectType, setEffectType] = useState<EffectType>(() =>
     getInitialEffectType(),
   );
-  const [sortField, setSortField] = useState<string | null>("id");
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(new Set());
   const [lastClickedIndex, setLastClickedIndex] = useState<number | null>(null);
@@ -163,6 +215,58 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
   const [historyNode, setHistoryNode] = useState<{ node: NodeWithTest; type: "latency" | "speed" } | null>(null);
   // 批量测试是否处于软停止中（用于顶栏显示"取消停止"和"强制停止"按钮）
   const [isBatchStopping, setIsBatchStopping] = useState(false);
+
+  // ===== TanStack Table 状态 =====
+  // 排序状态（默认按编号升序）
+  const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: false }]);
+
+  // 列宽状态：从 localStorage 恢复用户自定义列宽（按账号隔离）
+  // 三层列宽体系：columnSizing（用户拖拽调整） > autoColumnWidths（内容测量默认值） > defaultSize（静态默认值）
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(() => {
+    try {
+      const legacy = localStorage.getItem(COLUMN_SIZING_CACHE_KEY);
+      const key = username ? `${COLUMN_SIZING_CACHE_KEY}__${username}` : COLUMN_SIZING_CACHE_KEY;
+      // 一次性迁移旧 key 数据到当前账号
+      if (!localStorage.getItem(key) && legacy) {
+        try {
+          JSON.parse(legacy);
+          localStorage.setItem(key, legacy);
+          localStorage.removeItem(COLUMN_SIZING_CACHE_KEY);
+        } catch {
+          // 旧数据格式错误，跳过
+        }
+      }
+      const saved = localStorage.getItem(key);
+      if (saved) {
+        return JSON.parse(saved) as ColumnSizingState;
+      }
+    } catch {
+      // 缓存解析失败，使用空对象（全部使用默认列宽）
+    }
+    return {};
+  });
+
+  // 动态列宽测量结果：根据表格内容自动计算每列最小展示宽度
+  const [autoColumnWidths, setAutoColumnWidths] = useState<Record<string, number>>({});
+
+  // 持久化列宽到 localStorage
+  useEffect(() => {
+    const key = username ? `${COLUMN_SIZING_CACHE_KEY}__${username}` : COLUMN_SIZING_CACHE_KEY;
+    try {
+      localStorage.setItem(key, JSON.stringify(columnSizing));
+    } catch {
+      // 写入失败（如存储空间不足），忽略
+    }
+  }, [columnSizing, username]);
+
+  // 监听设置页面"重置列宽"事件，清空所有自定义列宽
+  useEffect(() => {
+    function handleReset() {
+      setColumnSizing({});
+    }
+    window.addEventListener("node-column-widths-reset", handleReset);
+    return () => window.removeEventListener("node-column-widths-reset", handleReset);
+  }, []);
 
   // 使用 ref 保存最新的 testingAll 值，避免订阅频繁取消和重注册导致丢失通知
   const testingAllRef = useRef(testingAll);
@@ -358,15 +462,6 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
     }
   }, [user, loadNodes, loadHistory]);
 
-  const handleSort = useCallback((field: string) => {
-    if (sortField === field) {
-      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
-    } else {
-      setSortField(field);
-      setSortDirection("asc");
-    }
-  }, [sortField, sortDirection]);
-
   const toggleSelectNode = useCallback((nodeId: number) => {
     setSelectedNodeIds((prev) => {
       const next = new Set(prev);
@@ -397,8 +492,9 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
     );
   }, []);
 
+  // 仅执行搜索/筛选，排序由 TanStack Table 的 getSortedRowModel 接管
   const filteredNodes = useMemo(() => {
-    let result = nodes.filter((node) => {
+    return nodes.filter((node) => {
       let matchesSearch = true;
       if (searchQuery) {
         const q = searchQuery.toLowerCase();
@@ -407,47 +503,183 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
           node.area.toLowerCase().includes(q) ||
           node.nodegroup.toLowerCase().includes(q);
       }
-      
+
       let matchesRegion = true;
       if (regionFilter === "domestic") {
         matchesRegion = node.china === "yes";
       } else if (regionFilter === "foreign") {
         matchesRegion = node.china === "no";
       }
-      
+
       let matchesUserType = true;
       if (userTypeFilter === "vip") {
         matchesUserType = node.nodegroup === "vip";
       } else if (userTypeFilter === "normal") {
         matchesUserType = node.nodegroup !== "vip";
       }
-      
+
       return matchesSearch && matchesRegion && matchesUserType;
     });
-    
-    if (sortField) {
-  result = [...result].sort((a, b) => {
-    if (sortField === "id") {
-      return sortDirection === "asc" ? a.id - b.id : b.id - a.id;
-    } else if (sortField === "latency") {
-      const aLatency = a.latency ?? Infinity;
-      const bLatency = b.latency ?? Infinity;
-      return sortDirection === "asc" ? aLatency - bLatency : bLatency - aLatency;
-    } else if (sortField === "downloadSpeed") {
-      const aSpeed = a.downloadSpeed ?? (sortDirection === "asc" ? Infinity : -1);
-      const bSpeed = b.downloadSpeed ?? (sortDirection === "asc" ? Infinity : -1);
-      return sortDirection === "asc" ? aSpeed - bSpeed : bSpeed - aSpeed;
-    } else if (sortField === "recommendScore") {
-      const aScore = calcRecommendScore(a) ?? (sortDirection === "asc" ? Infinity : -1);
-      const bScore = calcRecommendScore(b) ?? (sortDirection === "asc" ? Infinity : -1);
-      return sortDirection === "asc" ? aScore - bScore : bScore - aScore;
-    }
-    return 0;
+  }, [nodes, regionFilter, userTypeFilter, searchQuery]);
+
+  // ===== 动态列宽测量 =====
+  // 测量每列内容最大宽度，计算动态默认列宽（展示全部内容的前提下的最小宽度）
+  // 表格内容更新时自动重新测量
+  // 由于 table-fixed 布局下 scrollWidth 等于列宽而非内容宽度，
+  // 需要克隆表格到隐藏容器并切换为 auto 布局测量真实内容宽度
+  const tableContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!tableContainerRef.current || filteredNodes.length === 0) return;
+    const wrapper = tableContainerRef.current;
+    // 使用 requestAnimationFrame 避免阻塞渲染，并确保 DOM 已更新
+    const rafId = requestAnimationFrame(() => {
+      const sourceTable = wrapper.querySelector("table");
+      if (!sourceTable) return;
+      // 克隆表格到隐藏容器，使用 auto 布局测量真实内容宽度
+      const clone = sourceTable.cloneNode(true) as HTMLTableElement;
+      // 移除克隆中所有单元格的固定宽度样式，让内容决定宽度
+      clone.querySelectorAll("th, td").forEach((cell) => {
+        cell.removeAttribute("style");
+      });
+      const measureContainer = document.createElement("div");
+      measureContainer.style.position = "absolute";
+      measureContainer.style.left = "-9999px";
+      measureContainer.style.top = "0";
+      measureContainer.style.visibility = "hidden";
+      // 使用 auto 布局，列宽由内容决定
+      measureContainer.style.width = "max-content";
+      clone.style.tableLayout = "auto";
+      clone.style.width = "auto";
+      measureContainer.appendChild(clone);
+      document.body.appendChild(measureContainer);
+      const rows = clone.querySelectorAll("tr");
+      const measured: Record<string, number> = {};
+      COLUMN_CONFIG.forEach((c, index) => {
+        let maxWidth = c.minSize;
+        rows.forEach((row) => {
+          const cell = row.children[index] as HTMLElement | undefined;
+          if (cell) {
+            // offsetWidth 包含内容完整宽度（含内边距和边框）
+            const cellWidth = cell.offsetWidth;
+            if (cellWidth > maxWidth) maxWidth = cellWidth;
+          }
+        });
+        // 加 4px 余量，避免边界情况截断
+        measured[c.id] = Math.max(c.minSize, maxWidth + 4);
+      });
+      document.body.removeChild(measureContainer);
+      setAutoColumnWidths(measured);
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [filteredNodes]);
+
+  // ===== TanStack Table 列定义 =====
+  // 三层列宽体系：
+  // 1. columnSizing（用户拖拽调整过的列宽，持久化到 localStorage）
+  // 2. autoColumnWidths（根据内容动态测量的默认列宽）
+  // 3. defaultSize（静态默认列宽，作为兜底）
+  // TanStack 的 column.getSize() 自动合并：columnSizing[id] ?? columnDef.size
+  const columns = useMemo<ColumnDef<typeof features, NodeWithTest>[]>(() => {
+    const getSize = (id: string, defaultSize: number, minSize: number) => {
+      const measured = autoColumnWidths[id];
+      if (measured != null) return Math.max(measured, minSize);
+      return defaultSize;
+    };
+
+    return [
+      columnHelper.display({
+        id: "select",
+        size: getSize("select", 48, 36),
+        minSize: 36,
+        enableSorting: false,
+        enableResizing: true,
+      }),
+      columnHelper.accessor("id", {
+        size: getSize("id", 64, 48),
+        minSize: 48,
+        enableResizing: true,
+      }),
+      columnHelper.accessor("name", {
+        size: getSize("name", 180, 80),
+        minSize: 80,
+        enableSorting: false,
+        enableResizing: true,
+      }),
+      columnHelper.accessor("area", {
+        size: getSize("area", 140, 60),
+        minSize: 60,
+        enableSorting: false,
+        enableResizing: true,
+      }),
+      columnHelper.accessor("nodegroup", {
+        size: getSize("nodegroup", 80, 64),
+        minSize: 64,
+        enableSorting: false,
+        enableResizing: true,
+      }),
+      columnHelper.accessor("china", {
+        size: getSize("china", 80, 64),
+        minSize: 64,
+        enableSorting: false,
+        enableResizing: true,
+      }),
+      columnHelper.display({
+        id: "status",
+        size: getSize("status", 96, 80),
+        minSize: 80,
+        enableSorting: false,
+        enableResizing: true,
+      }),
+      columnHelper.accessor("latency", {
+        size: getSize("latency", 80, 64),
+        minSize: 64,
+        enableResizing: true,
+        // 未测试节点的延迟视为 Infinity，排在最后（升序）或最前（降序）
+        sortFn: (rowA, rowB) => {
+          const a = rowA.original.latency ?? Infinity;
+          const b = rowB.original.latency ?? Infinity;
+          return a - b;
+        },
+      }),
+      columnHelper.accessor("downloadSpeed", {
+        size: getSize("downloadSpeed", 96, 80),
+        minSize: 80,
+        enableResizing: true,
+        // 未测试节点的速度视为 -1，排在最前（升序）或最后（降序）
+        sortFn: (rowA, rowB) => {
+          const a = rowA.original.downloadSpeed ?? -1;
+          const b = rowB.original.downloadSpeed ?? -1;
+          return a - b;
+        },
+      }),
+      columnHelper.display({
+        id: "recommendScore",
+        size: getSize("recommendScore", 88, 72),
+        minSize: 72,
+        enableResizing: true,
+        // 推荐值基于速度和延迟加权计算，未测试节点视为 -1
+        sortFn: (rowA, rowB) => {
+          const a = calcRecommendScore(rowA.original) ?? -1;
+          const b = calcRecommendScore(rowB.original) ?? -1;
+          return a - b;
+        },
+      }),
+    ];
+  }, [autoColumnWidths]);
+
+  // ===== 创建 TanStack Table 实例 =====
+  const table = useTable({
+    features,
+    columns,
+    data: filteredNodes,
+    state: { sorting, columnSizing },
+    onSortingChange: setSorting,
+    onColumnSizingChange: setColumnSizing,
+    enableColumnResizing: true,
+    columnResizeMode: "onChange",
+    getRowId: (row) => String(row.id),
   });
-}
-    
-    return result;
-  }, [nodes, regionFilter, userTypeFilter, sortField, sortDirection, searchQuery]);
 
   // 计算当前可见节点中的选中数量
   const visibleSelectedCount = useMemo(() => {
@@ -479,24 +711,24 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
 
   const filteredHistory = useMemo(() => {
     return testHistory.filter((record) => {
-      const matchesRegion = regionFilter === "all" || 
+      const matchesRegion = regionFilter === "all" ||
         (regionFilter === "domestic" && record.china === "yes") ||
         (regionFilter === "foreign" && record.china === "no");
-      
+
       return matchesRegion;
     }).sort((a, b) => b.timestamp - a.timestamp);
   }, [testHistory, regionFilter, userTypeFilter]);
 
   const openBatchSpeedTestWithNodes = useCallback(() => {
-    const nodesToTest = visibleSelectedCount > 0 
+    const nodesToTest = visibleSelectedCount > 0
       ? filteredNodes.filter((n) => selectedNodeIds.has(n.id))
       : filteredNodes;
-    
+
     if (nodesToTest.length === 0) {
       toast.error("没有可测试的节点");
       return;
     }
-    
+
     setBatchTestNodes(nodesToTest);
     setShowBatchTestDialog(true);
   }, [filteredNodes, selectedNodeIds, visibleSelectedCount]);
@@ -539,6 +771,32 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
 
   // 登录状态：未登录时禁止测试/刷新/历史等操作（涉及账号隔离的缓存数据）
   const isLoggedIn = !!user?.username;
+
+  // ===== 表头渲染辅助 =====
+  const renderSortIcon = (columnId: string) => {
+    const sortState = table.state.sorting.find((s) => s.id === columnId);
+    if (!sortState) return <ArrowUpDown className="w-3 h-3 opacity-50" />;
+    return sortState.desc ? (
+      <ArrowDown className="w-3 h-3" />
+    ) : (
+      <ArrowUp className="w-3 h-3" />
+    );
+  };
+
+  // 列宽拖拽手柄（拖拽调整列宽，双击恢复动态默认值）
+  // 注意：getResizeHandler 是 Header 的方法，不是 Column 的
+  const renderResizeHandle = (header: Header<typeof features, NodeWithTest>) => {
+    const column = header.column;
+    if (!column.getCanResize()) return null;
+    return (
+      <span
+        onMouseDown={header.getResizeHandler()}
+        onDoubleClick={() => column.resetSize()}
+        className="absolute right-0 top-1/2 -translate-y-1/2 h-4 w-1 rounded-full cursor-col-resize bg-muted-foreground/12 hover:bg-primary/70 transition-colors"
+        title="拖拽调整列宽，双击恢复默认"
+      />
+    );
+  };
 
   return (
     <div className="flex flex-col h-full gap-4">
@@ -802,221 +1060,194 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
           </EmptyContent>
         </Empty>
       ) : (
-        <div className="flex-1 min-h-0">
-          <div className={cn(
-            "h-scroll-outer h-full max-h-full rounded-md border bg-card overflow-x-auto overflow-y-auto visible-scrollbar",
+        <div
+          ref={tableContainerRef}
+          className={cn(
+            "thead-locked h-scroll-outer flex-1 min-h-0 rounded-md border bg-card overflow-auto visible-scrollbar",
             effectType === "frosted" && "backdrop-blur-md bg-card/80",
             effectType === "translucent" && "bg-card/80",
-          )}>
-            <Table className="w-full">
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="min-w-[48px] w-12">
-                    <button
-                      onClick={toggleSelectAll}
-                      className="flex items-center justify-center"
-                    >
-                      {selectedNodeIds.size === filteredNodes.length && filteredNodes.length > 0 ? (
-                        <CheckSquare className="w-4 h-4" />
-                      ) : (
-                        <Square className="w-4 h-4" />
-                      )}
-                    </button>
-                  </TableHead>
-                  <TableHead className="min-w-[64px] w-16">
-                    <button
-                      onClick={() => handleSort("id")}
-                      className="flex items-center gap-1 hover:text-foreground transition-colors"
-                    >
-                      编号
-                      {sortField === "id" ? (
-                        sortDirection === "asc" ? (
-                          <ArrowUp className="w-3 h-3" />
-                        ) : (
-                          <ArrowDown className="w-3 h-3" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3 h-3 opacity-50" />
-                      )}
-                    </button>
-                  </TableHead>
-                  <TableHead className="min-w-[80px] max-w-[180px]">节点名称</TableHead>
-                  <TableHead className="min-w-[60px] max-w-[140px]">区域</TableHead>
-                  <TableHead className="min-w-[80px] w-20">节点组</TableHead>
-                  <TableHead className="min-w-[80px] w-20">地域</TableHead>
-                  <TableHead className="min-w-[96px] w-24">状态</TableHead>
-                  <TableHead className="min-w-[60px]">
-                    <button
-                      onClick={() => handleSort("latency")}
-                      className="flex items-center gap-1 hover:text-foreground transition-colors"
-                    >
-                      延迟
-                      {sortField === "latency" ? (
-                        sortDirection === "asc" ? (
-                          <ArrowUp className="w-3 h-3" />
-                        ) : (
-                          <ArrowDown className="w-3 h-3" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3 h-3 opacity-50" />
-                      )}
-                    </button>
-        </TableHead>
-        <TableHead>
-          <button
-            onClick={() => handleSort("downloadSpeed")}
-            className="flex items-center gap-1 hover:text-foreground transition-colors"
-          >
-            带宽速度
-            {sortField === "downloadSpeed" ? (
-              sortDirection === "asc" ? (
-                <ArrowUp className="w-3 h-3" />
-              ) : (
-                <ArrowDown className="w-3 h-3" />
-              )
-            ) : (
-              <ArrowUpDown className="w-3 h-3 opacity-50" />
-            )}
-          </button>
-        </TableHead>
-        <TableHead className="min-w-[88px]">
-          <button
-            onClick={() => handleSort("recommendScore")}
-            className="flex items-center gap-1 hover:text-foreground transition-colors"
-            title="基于带宽速度（60%）和延迟（40%）加权计算"
-          >
-            推荐值
-            {sortField === "recommendScore" ? (
-              sortDirection === "asc" ? (
-                <ArrowUp className="w-3 h-3" />
-              ) : (
-                <ArrowDown className="w-3 h-3" />
-              )
-            ) : (
-              <ArrowUpDown className="w-3 h-3 opacity-50" />
-            )}
-          </button>
-        </TableHead>
-        {/* 操作列已注释：节点右侧测试按钮与顶部测试组件存在显示差异，暂时隐藏
-        <TableHead className="text-right">操作</TableHead>
-        */}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredNodes.map((node, index) => (
-                  <TableRow 
-                    key={node.id} 
-                    className={cn(selectedNodeIds.has(node.id) && "bg-accent/50")}
-                  >
-                    <TableCell className="min-w-[48px] w-12">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRowClick(e, node.id, index);
-                        }}
-                        className="flex items-center justify-center"
+          )}
+        >
+          <Table className="w-full table-fixed" containerClassName="!overflow-visible">
+            <TableHeader className="[&>tr]:sticky [&>tr]:top-0 [&>tr]:right-0 [&>tr]:z-30">
+              {table.getHeaderGroups().map((headerGroup) => (
+                <TableRow key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => {
+                    const columnId = header.column.id;
+                    const width = header.getSize();
+                    return (
+                      <TableHead
+                        key={header.id}
+                        style={{ width, minWidth: width, maxWidth: width }}
+                        className="relative"
                       >
-                        {selectedNodeIds.has(node.id) ? (
-                          <CheckSquare className="w-4 h-4" />
-                        ) : (
-                          <Square className="w-4 h-4" />
-                        )}
-                      </button>
-                    </TableCell>
-                    <TableCell className="min-w-[64px] text-muted-foreground">{node.id}</TableCell>
-                    <TableCell className="font-medium min-w-[80px] max-w-[180px]">
-                      <span className="block truncate" title={node.name}>{highlightText(node.name, searchQuery)}</span>
-                    </TableCell>
-                    <TableCell className="min-w-[60px] max-w-[140px]">
-                      <span className="block truncate" title={node.area}>{highlightText(node.area, searchQuery)}</span>
-                    </TableCell>
-                    <TableCell className="min-w-[80px]">
-                      <Badge variant={node.nodegroup === "vip" ? "default" : "outline"} className="text-xs">
-                        {node.nodegroup === "vip" ? "VIP" : "普通"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="min-w-[80px]">
-                      <Badge variant="outline" className="text-xs">
-                        {node.china === "yes" ? "国内" : "国外"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="min-w-[96px]">{getStatusBadge(node)}</TableCell>
-                    <TableCell className="min-w-[60px]">
-                      {node.latency != null ? (
-                        <span 
-                          className="flex items-center gap-1 cursor-pointer hover:text-primary transition-colors"
-                          onClick={() => setHistoryNode({ node, type: "latency" })}
-                          title="点击查看延迟历史"
-                        >
-                          <Clock className="w-3 h-3 text-muted-foreground" />
-                          {node.latency.toFixed(0)}ms
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">-</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {node.downloadSpeed != null ? (
-                        <span
-                          className="flex items-center gap-1 cursor-pointer hover:text-primary transition-colors"
-                          onClick={() => setHistoryNode({ node, type: "speed" })}
-                          title="点击查看速度历史"
-                        >
-                          <Download className="w-3 h-3 text-muted-foreground" />
-                          {node.downloadSpeed >= 1000
-                            ? `${(node.downloadSpeed / 1000).toFixed(1)} Gbps`
-                            : `${node.downloadSpeed.toFixed(0)} Mbps`}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">-</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="min-w-[88px]">
-                      {(() => {
-                        const score = calcRecommendScore(node);
-                        if (score == null) {
-                          return <span className="text-muted-foreground">-</span>;
-                        }
-                        const color =
-                          score >= 80
-                            ? "text-green-600 dark:text-green-400"
-                            : score >= 60
-                              ? "text-blue-600 dark:text-blue-400"
-                              : score >= 40
-                                ? "text-yellow-600 dark:text-yellow-400"
-                                : "text-red-600 dark:text-red-400";
-                        return (
-                          <span
-                            className={cn("font-medium tabular-nums", color)}
+                        {/* 根据列 ID 渲染不同的表头内容 */}
+                        {columnId === "select" ? (
+                          <button
+                            onClick={toggleSelectAll}
+                            className="flex items-center justify-center"
+                          >
+                            {selectedNodeIds.size === filteredNodes.length && filteredNodes.length > 0 ? (
+                              <CheckSquare className="w-4 h-4" />
+                            ) : (
+                              <Square className="w-4 h-4" />
+                            )}
+                          </button>
+                        ) : columnId === "recommendScore" ? (
+                          <button
+                            onClick={header.column.getToggleSortingHandler()}
+                            className="flex items-center gap-1 hover:text-foreground transition-colors"
                             title="基于带宽速度（60%）和延迟（40%）加权计算"
                           >
-                            {score.toFixed(2)}
-                          </span>
-                        );
-                      })()}
-                    </TableCell>
-                    {/* 节点右侧测试按钮已注释：与顶部测试组件存在显示差异（条形图/折线图不显示），暂时隐藏
-                    <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          setBatchTestNodes([node]);
-                          setShowBatchTestDialog(true);
-                        }}
-                        disabled={node.testStatus === "testing"}
-                        className="h-7 px-2 text-xs"
-                        title="速度测试"
-                      >
-                        <Gauge className="h-3.5 w-3.5" />
-                      </Button>
-                    </TableCell>
-                    */}
+                            推荐值
+                            {renderSortIcon(columnId)}
+                          </button>
+                        ) : COLUMN_CONFIG.find((c) => c.id === columnId)?.enableSorting ? (
+                          <button
+                            onClick={header.column.getToggleSortingHandler()}
+                            className="flex items-center gap-1 hover:text-foreground transition-colors"
+                          >
+                            {typeof header.column.columnDef.header === "string"
+                              ? header.column.columnDef.header
+                              : columnId === "id" ? "编号" :
+                                columnId === "name" ? "节点名称" :
+                                columnId === "area" ? "区域" :
+                                columnId === "nodegroup" ? "节点组" :
+                                columnId === "china" ? "地域" :
+                                columnId === "status" ? "状态" :
+                                columnId === "latency" ? "延迟" :
+                                columnId === "downloadSpeed" ? "带宽速度" : columnId}
+                            {renderSortIcon(columnId)}
+                          </button>
+                        ) : (
+                          <>
+                            {columnId === "id" ? "编号" :
+                              columnId === "name" ? "节点名称" :
+                              columnId === "area" ? "区域" :
+                              columnId === "nodegroup" ? "节点组" :
+                              columnId === "china" ? "地域" :
+                              columnId === "status" ? "状态" :
+                              columnId === "latency" ? "延迟" :
+                              columnId === "downloadSpeed" ? "带宽速度" : columnId}
+                          </>
+                        )}
+                        {renderResizeHandle(header)}
+                      </TableHead>
+                    );
+                  })}
+                </TableRow>
+              ))}
+            </TableHeader>
+            <TableBody>
+              {table.getRowModel().rows.map((row, visualIndex) => {
+                const node = row.original;
+                return (
+                  <TableRow
+                    key={row.id}
+                    className={cn(selectedNodeIds.has(node.id) && "bg-accent/50")}
+                  >
+                    {row.getAllCells().map((cell) => {
+                      const columnId = cell.column.id;
+                      const width = cell.column.getSize();
+                      return (
+                        <TableCell
+                          key={cell.id}
+                          style={{ width, minWidth: width, maxWidth: width }}
+                        >
+                          {columnId === "select" ? (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRowClick(e, node.id, visualIndex);
+                              }}
+                              className="flex items-center justify-center"
+                            >
+                              {selectedNodeIds.has(node.id) ? (
+                                <CheckSquare className="w-4 h-4" />
+                              ) : (
+                                <Square className="w-4 h-4" />
+                              )}
+                            </button>
+                          ) : columnId === "id" ? (
+                            <span className="text-muted-foreground">{node.id}</span>
+                          ) : columnId === "name" ? (
+                            <span className="font-medium block truncate" title={node.name}>
+                              {highlightText(node.name, searchQuery)}
+                            </span>
+                          ) : columnId === "area" ? (
+                            <span className="block truncate" title={node.area}>
+                              {highlightText(node.area, searchQuery)}
+                            </span>
+                          ) : columnId === "nodegroup" ? (
+                            <Badge variant={node.nodegroup === "vip" ? "default" : "outline"} className="text-xs">
+                              {node.nodegroup === "vip" ? "VIP" : "普通"}
+                            </Badge>
+                          ) : columnId === "china" ? (
+                            <Badge variant="outline" className="text-xs">
+                              {node.china === "yes" ? "国内" : "国外"}
+                            </Badge>
+                          ) : columnId === "status" ? (
+                            getStatusBadge(node)
+                          ) : columnId === "latency" ? (
+                            node.latency != null ? (
+                              <span
+                                className="flex items-center gap-1 cursor-pointer hover:text-primary transition-colors"
+                                onClick={() => setHistoryNode({ node, type: "latency" })}
+                                title="点击查看延迟历史"
+                              >
+                                <Clock className="w-3 h-3 text-muted-foreground" />
+                                {node.latency.toFixed(0)}ms
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )
+                          ) : columnId === "downloadSpeed" ? (
+                            node.downloadSpeed != null ? (
+                              <span
+                                className="flex items-center gap-1 cursor-pointer hover:text-primary transition-colors"
+                                onClick={() => setHistoryNode({ node, type: "speed" })}
+                                title="点击查看速度历史"
+                              >
+                                <Download className="w-3 h-3 text-muted-foreground" />
+                                {node.downloadSpeed >= 1000
+                                  ? `${(node.downloadSpeed / 1000).toFixed(1)} Gbps`
+                                  : `${node.downloadSpeed.toFixed(0)} Mbps`}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )
+                          ) : columnId === "recommendScore" ? (
+                            (() => {
+                              const score = calcRecommendScore(node);
+                              if (score == null) {
+                                return <span className="text-muted-foreground">-</span>;
+                              }
+                              const color =
+                                score >= 80
+                                  ? "text-green-600 dark:text-green-400"
+                                  : score >= 60
+                                    ? "text-blue-600 dark:text-blue-400"
+                                    : score >= 40
+                                      ? "text-yellow-600 dark:text-yellow-400"
+                                      : "text-red-600 dark:text-red-400";
+                              return (
+                                <span
+                                  className={cn("font-medium tabular-nums", color)}
+                                  title="基于带宽速度（60%）和延迟（40%）加权计算"
+                                >
+                                  {score.toFixed(2)}
+                                </span>
+                              );
+                            })()
+                          ) : null}
+                        </TableCell>
+                      );
+                    })}
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+                );
+              })}
+            </TableBody>
+          </Table>
         </div>
       )}
 
@@ -1047,7 +1278,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
                 downloadSpeed: mergedSpeed,
                 success: !result.error,
                 error: result.error,
-              });
+              }, username);
               updatedNodes[nodeIndex] = {
                 ...node,
                 testStatus: result.error ? "failed" as const : "success" as const,
@@ -1068,8 +1299,8 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
         }}
       />
 
-      <BatchTestFloatingWidget 
-        onExpand={() => setShowBatchTestDialog(true)} 
+      <BatchTestFloatingWidget
+        onExpand={() => setShowBatchTestDialog(true)}
         isDialogOpen={showBatchTestDialog && batchTestNodes !== null}
       />
 
@@ -1079,6 +1310,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
         nodeName={historyNode?.node.name || ""}
         nodeId={historyNode?.node.id || 0}
         type={historyNode?.type || "latency"}
+        username={username}
       />
     </div>
   );
