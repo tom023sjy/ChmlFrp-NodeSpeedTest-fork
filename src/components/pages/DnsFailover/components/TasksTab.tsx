@@ -40,6 +40,7 @@ import {
 import { ddnsService, type ChmlfrpAvailableDomain } from "@/services/ddnsService";
 import { TunnelSelect } from "./TunnelSelect";
 import { useEffectType, getCardClassName } from "@/lib/useEffectType";
+import { reportUsage } from "@/services/backendApi";
 
 interface TasksTabProps {
   user?: StoredUser | null;
@@ -289,6 +290,10 @@ export function TasksTab({ user }: TasksTabProps) {
         return;
       }
       await dnsFailoverService.saveTask(user.username, { ...task, enabled: !task.enabled });
+      // DNS 容灾监控启用埋点：仅在该任务原本停用、本次启用时上报（即触发监控），失败静默
+      if (!task.enabled && user?.accessToken) {
+        reportUsage({ eventType: "dns_monitor" }).catch(() => {});
+      }
       load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "切换失败");

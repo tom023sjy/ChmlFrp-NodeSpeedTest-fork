@@ -1,4 +1,7 @@
 mod commands;
+mod crypto;
+mod db;
+mod migration;
 mod models;
 mod utils;
 
@@ -38,6 +41,14 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // 初始化 SQLite 数据库（替代 JSON 文件存储）
+            if let Err(e) = db::init(app.handle()) {
+                log::error!("数据库初始化失败: {}", e);
+                return Err(e.into());
+            }
+            // 自动迁移旧 JSON 数据到数据库
+            migration::run(app.handle());
+
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
                 {
@@ -182,9 +193,22 @@ pub fn run() {
             commands::ssl_save_log,
             commands::ssl_list_logs,
             commands::ssl_clear_logs,
+            // 安全存储命令（敏感数据加密存储）
+            commands::secure_store,
+            commands::secure_load,
+            commands::secure_delete,
             // 窗口与托盘相关命令
             commands::minimize_to_tray,
             commands::exit_app,
+            commands::open_system_url,
+            // 系统信息（设备互联注册用）
+            commands::get_system_info,
+            // 设备互联 RPC 命令（被管理端执行）
+            commands::relay_ping,
+            commands::relay_tcping,
+            commands::relay_node_latency,
+            commands::relay_speedtest,
+            commands::relay_delete_my_data,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

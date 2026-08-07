@@ -104,10 +104,7 @@ pub fn start_monitor(app_handle: tauri::AppHandle) {
 
 /// 单轮检查：遍历所有启用的任务，调用 /tunnel 接口判定并切换
 async fn run_once(app_handle: &tauri::AppHandle) -> Result<(), String> {
-    let tasks: Vec<DnsMonitorTask> = {
-        let path = dns_config_path(app_handle, "dns-tasks.json")?;
-        read_json(&path, Vec::new())
-    };
+    let tasks: Vec<DnsMonitorTask> = dns_config::list_all_tasks(app_handle).unwrap_or_default();
     if tasks.is_empty() {
         return Ok(());
     }
@@ -530,8 +527,7 @@ fn find_credential(
     if id == CHMLFRP_CREDENTIAL_ID {
         return build_chmlfrp_credential_from_user_token(app_handle);
     }
-    let path = dns_config_path(app_handle, "dns-credentials.json")?;
-    let list: Vec<DnsCredential> = read_json(&path, Vec::new());
+    let list: Vec<DnsCredential> = dns_config::list_all_credentials(app_handle).unwrap_or_default();
     list.into_iter()
         .find(|c| {
             c.id == id
@@ -613,21 +609,6 @@ fn write_log(
     dns_config::append_log(app_handle, log);
 }
 
-// 工具：读取本地 DNS 配置文件路径
-fn dns_config_path(app_handle: &tauri::AppHandle, file: &str) -> Result<std::path::PathBuf, String> {
-    let base = crate::utils::get_app_data_dir(app_handle)?;
-    let dir = base.join("dns-failover");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 DNS 配置目录失败: {}", e))?;
-    Ok(dir.join(file))
-}
-
-fn read_json<T: for<'de> serde::Deserialize<'de>>(path: &std::path::PathBuf, default: T) -> T {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(default)
-}
-
 /// 手动触发一次检查（前端"立即检查"按钮调用）
 #[tauri::command]
 pub async fn trigger_dns_check(app_handle: tauri::AppHandle) -> Result<(), String> {
@@ -640,13 +621,7 @@ pub async fn trigger_dns_check_task(
     app_handle: tauri::AppHandle,
     task_id: String,
 ) -> Result<(), String> {
-    let tasks: Vec<DnsMonitorTask> = {
-        let path = dns_config_path(&app_handle, "dns-tasks.json")?;
-        read_json(&path, Vec::new())
-    };
-    let task = tasks
-        .into_iter()
-        .find(|t| t.id == task_id)
+    let task: DnsMonitorTask = dns_config::get_task_by_id(&app_handle, &task_id)?
         .ok_or_else(|| format!("未找到任务: {}", task_id))?;
     // 即使获取隧道失败，也更新 last_check/last_result，让前端看到状态变化
     let (tunnels, fetch_error) = match fetch_tunnels(&app_handle, &task.user_token).await {

@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import {
   Settings as SettingsIcon,
-  X,
   LogIn,
   LogOut,
   User,
@@ -12,19 +11,24 @@ import {
   ShieldCheck,
   Globe,
   KeyRound,
+  Info,
+  MonitorSmartphone,
 } from "lucide-react";
 import { BetaTag } from "@/components/ui/beta-tag";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
 import {
-  clearStoredUser,
-  createDeviceAuthorization,
-  exchangeDeviceCodeForToken,
-  loginWithAccessToken,
+  loginWithProxyToken,
+  logoutWithProxyToken,
   saveStoredUser,
-  type DeviceAuthorizationResponse,
   type StoredUser,
 } from "@/services/api";
+import {
+  generateSessionId,
+  buildLoginUrl,
+  startLoginPolling,
+  reportUsage,
+} from "@/services/backendApi";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { toast } from "sonner";
 import type { SidebarMode } from "@/lib/settings-utils";
 import { getInitialEffectType, type EffectType } from "@/lib/settings-utils";
 
@@ -102,19 +106,25 @@ export function Sidebar({
     };
   }, []);
 
-  const [loginOpen, setLoginOpen] = useState(false);
-  const [rememberMe, setRememberMe] = useState(true);
-  const [loading, setLoading] = useState(false);
+  const [rememberMe] = useState(true);
+  const [, setLoading] = useState(false);
   const [polling, setPolling] = useState(false);
-  const [error, setError] = useState("");
-  const [authSession, setAuthSession] =
-    useState<DeviceAuthorizationResponse | null>(null);
-  const [authMessage, setAuthMessage] = useState(
+  const [remainingSeconds, setRemainingSeconds] = useState<number>(0);
+  const [, setAuthMessage] = useState(
     "将在浏览器中打开授权页面",
   );
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
-  const pollingTimerRef = useRef<number | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  /** 标记用户主动取消登录（区别于轮询失败） */
+  const cancelRequestedRef = useRef(false);
+
+  /** 格式化倒计时为 mm:ss */
+  const formatCountdown = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  };
 
   // 点击外部关闭用户菜单
   useEffect(() => {
@@ -139,152 +149,96 @@ export function Sidebar({
   }, [userMenuOpen, mode]);
 
   const stopPolling = () => {
-    if (pollingTimerRef.current) {
-      clearTimeout(pollingTimerRef.current);
-      pollingTimerRef.current = null;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
     setPolling(false);
+    setRemainingSeconds(0);
   };
 
   const resetLoginFlow = () => {
     stopPolling();
     setLoading(false);
-    setError("");
-    setAuthSession(null);
     setAuthMessage("将在浏览器中打开授权页面");
-  };
-
-  const closeLoginDialog = () => {
-    setLoginOpen(false);
-    resetLoginFlow();
+    setRemainingSeconds(0);
   };
 
   const finishLogin = async (
-    accessToken: string,
-    options?: {
-      refreshToken?: string;
-      expiresIn?: number;
-      tokenType?: string;
+    proxyToken: string,
+    user: {
+      username: string;
+      usergroup: string;
+      userimg?: string | null;
+      usertoken?: string;
+      email?: string | null;
+      phone?: string | null;
     },
+    proxyExpiresAt?: string | null,
   ) => {
-    const authedUser = await loginWithAccessToken(accessToken, {
-      refresh_token: options?.refreshToken,
-      expires_in: options?.expiresIn,
-      token_type: options?.tokenType,
-    });
+    const authedUser = await loginWithProxyToken(proxyToken, user, proxyExpiresAt);
     onUserChange(authedUser);
     if (rememberMe) {
       saveStoredUser(authedUser);
     }
     stopPolling();
     setUserMenuOpen(false);
-    closeLoginDialog();
+    resetLoginFlow();
+    // 上报登录事件
+    reportUsage({ eventType: "login" }).catch(() => {});
   };
 
-  const scheduleTokenPolling = (deviceCode: string, intervalSeconds: number) => {
-    if (pollingTimerRef.current) {
-      clearTimeout(pollingTimerRef.current);
+  /** 用户主动取消登录轮询 */
+  const cancelLoginPolling = () => {
+    cancelRequestedRef.current = true;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
     }
-
-    pollingTimerRef.current = window.setTimeout(() => {
-      void pollToken(deviceCode, intervalSeconds);
-    }, intervalSeconds * 1000);
+    stopPolling();
+    setLoading(false);
+    toast.info("已取消登录");
   };
 
-  const pollToken = async (deviceCode: string, intervalSeconds: number) => {
-    setPolling(true);
+  const startBrowserLogin = async () => {
+    stopPolling();
+    cancelRequestedRef.current = false;
+    setLoading(true);
+    setAuthMessage("正在准备授权页面...");
+
     try {
-      const tokenResponse = await exchangeDeviceCodeForToken(deviceCode);
+      const sessionId = generateSessionId();
+      const loginUrl = buildLoginUrl(sessionId);
 
-      if (tokenResponse.access_token) {
-        await finishLogin(tokenResponse.access_token, {
-          refreshToken: tokenResponse.refresh_token,
-          expiresIn: tokenResponse.expires_in,
-          tokenType: tokenResponse.token_type,
-        });
-        return;
-      }
+      // 在系统浏览器中打开后端登录页（含极验验证码 + qzhua OAuth）
+      await openUrl(loginUrl);
+      setAuthMessage("请在浏览器中完成验证码与授权");
+      setPolling(true);
+      toast.info("已在浏览器中打开登录页面，请完成授权");
 
-      if (tokenResponse.error === "authorization_pending") {
-        setAuthMessage("请在浏览器中确认授权");
-        scheduleTokenPolling(deviceCode, intervalSeconds);
-        return;
-      }
+      // 轮询后端 /auth/status 获取登录结果
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
 
-      if (tokenResponse.error === "slow_down") {
-        const nextInterval = intervalSeconds + 5;
-        setAuthMessage("连接受限，正在自动重试...");
-        scheduleTokenPolling(deviceCode, nextInterval);
-        return;
-      }
+      const result = await startLoginPolling(sessionId, {
+        intervalMs: 2000,
+        timeoutMs: 5 * 60 * 1000, // 5 分钟超时
+        signal: controller.signal,
+        onTick: (seconds) => setRemainingSeconds(seconds),
+      });
 
-      if (tokenResponse.error === "expired_token") {
-        stopPolling();
-        setError("这次设备授权已过期，请重新开始登录。");
-        return;
-      }
-
-      if (tokenResponse.error === "access_denied") {
-        stopPolling();
-        setError("你已取消本次授权，请重新开始登录。");
-        return;
-      }
-
-      throw new Error(
-        tokenResponse.error_description ||
-          tokenResponse.error ||
-          "获取访问令牌失败",
+      await finishLogin(
+        result.proxyToken,
+        result.user,
+        result.proxyExpiresAt ?? null,
       );
     } catch (err) {
       stopPolling();
-      setError(err instanceof Error ? err.message : "登录失败");
-    }
-  };
-
-  const openVerificationPage = async (
-    session: DeviceAuthorizationResponse | null,
-  ) => {
-    if (!session) {
-      setError("请先开始设备授权。");
-      return;
-    }
-
-    const target =
-      session.verification_uri_complete || session.verification_uri;
-
-    if (!target) {
-      setError("账户中心未返回可用的验证地址。");
-      return;
-    }
-
-    if (session.user_code) {
-      navigator.clipboard?.writeText(session.user_code).catch(() => undefined);
-    }
-
-    try {
-      await openUrl(target);
-      setAuthMessage("请在浏览器中完成授权");
-    } catch {
-      setAuthMessage("请手动打开验证页面完成授权");
-    }
-  };
-
-  const startDeviceLogin = async () => {
-    stopPolling();
-    setLoading(true);
-    setError("");
-    setAuthMessage("正在获取授权信息...");
-
-    try {
-      const session = await createDeviceAuthorization();
-      setAuthSession(session);
-      await openVerificationPage(session);
-      const intervalSeconds = Math.max(Number(session.interval || 5), 1);
-      void pollToken(session.device_code, intervalSeconds);
-    } catch (err) {
-      stopPolling();
-      setAuthSession(null);
-      setError(err instanceof Error ? err.message : "登录失败");
+      // 用户主动取消时不显示错误提示（cancelLoginPolling 已显示 info）
+      if (cancelRequestedRef.current) {
+        cancelRequestedRef.current = false;
+      } else {
+        toast.error(err instanceof Error ? err.message : "登录失败");
+      }
     } finally {
       setLoading(false);
     }
@@ -314,12 +268,19 @@ export function Sidebar({
       beta: true,
       betaTitle: "Beta 测试功能：此功能仍在测试阶段，可能出现数据异常、功能不稳定等问题，开发者不承担任何由此造成的损失或责任，请谨慎使用。",
     },
+    {
+      id: "device-management",
+      label: "设备管理",
+      icon: MonitorSmartphone,
+      beta: true,
+      betaTitle: "Beta 测试功能：此功能仍在测试阶段，可能出现数据异常、功能不稳定等问题，开发者不承担任何由此造成的损失或责任，请谨慎使用。",
+    },
     { id: "settings", label: "设置", icon: SettingsIcon },
+    { id: "about", label: "关于", icon: Info },
   ];
 
   const handleMenuClick = (itemId: string) => {
     if (disabled) return;
-    setError("");
     onTabChange(itemId);
   };
 
@@ -384,150 +345,12 @@ export function Sidebar({
         clearTimeout(animationTimeoutRef.current);
         animationTimeoutRef.current = null;
       }
-      if (pollingTimerRef.current) {
-        clearTimeout(pollingTimerRef.current);
-        pollingTimerRef.current = null;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
     };
   }, []);
-
-  // Shared Dialog Component
-  const LoginDialog = (
-    <Dialog
-      open={loginOpen}
-      onOpenChange={(open) => {
-        setLoginOpen(open);
-        if (!open) {
-          resetLoginFlow();
-        }
-      }}
-    >
-      <DialogContent
-        showCloseButton={false}
-        className="z-[10000] w-full max-w-[360px] overflow-hidden rounded-2xl bg-card/95 backdrop-blur-xl border border-border/50 p-0 shadow-2xl data-[state=closed]:slide-out-to-bottom-4 data-[state=open]:slide-in-from-bottom-4"
-      >
-        {/* 顶部视觉区域 */}
-        <div className="relative h-24 bg-gradient-to-br from-primary/5 via-background to-background flex items-center justify-center overflow-hidden">
-          <button
-            type="button"
-            className="absolute top-4 right-4 h-8 w-8 rounded-full bg-foreground/5 hover:bg-foreground/10 transition-colors flex items-center justify-center text-muted-foreground hover:text-foreground z-10"
-            onClick={closeLoginDialog}
-          >
-            <X className="w-4 h-4" />
-          </button>
-          <div className="relative h-12 w-12 rounded-xl bg-primary flex items-center justify-center">
-            <LogIn className="w-5 h-5 text-primary-foreground" />
-          </div>
-        </div>
-
-        {/* 主体内容 */}
-        <div className="px-6 pb-6 pt-0 space-y-5">
-          <div className="text-center space-y-1">
-            <h2 className="text-lg font-semibold tracking-tight text-foreground">欢迎回来</h2>
-            <p className="text-xs text-muted-foreground">通过浏览器安全地登录你的账户</p>
-          </div>
-
-          {!authSession ? (
-            <div className="flex flex-col gap-3 pt-2">
-              <button
-                type="button"
-                disabled={loading}
-                onClick={startDeviceLogin}
-                className="w-full rounded-xl bg-primary text-primary-foreground py-2.5 text-sm font-medium hover:bg-primary/90 disabled:opacity-70 disabled:cursor-not-allowed transition-all active:scale-[0.98]"
-              >
-                {loading ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="h-4 w-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
-                    正在连接...
-                  </span>
-                ) : (
-                  <span className="flex items-center justify-center gap-2">
-                    授权登录
-                  </span>
-                )}
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-              <div className="flex flex-col items-center justify-center p-4 rounded-xl bg-muted/30 border border-border/50">
-                <span className="text-xs font-medium text-muted-foreground mb-1.5">你的设备码</span>
-                <span className="font-mono text-2xl font-bold tracking-widest text-foreground">
-                  {authSession.user_code || "-"}
-                </span>
-              </div>
-
-              <div className="space-y-2.5">
-                <button
-                  type="button"
-                  onClick={() => void openVerificationPage(authSession)}
-                  className="w-full rounded-xl bg-primary text-primary-foreground py-2.5 text-sm font-medium hover:bg-primary/90 transition-all active:scale-[0.98]"
-                >
-                  在浏览器中打开授权页
-                </button>
-                {polling && (
-                  <button
-                    type="button"
-                    onClick={stopPolling}
-                    className="w-full rounded-xl border border-border bg-transparent py-2.5 text-sm font-medium text-foreground hover:bg-muted/50 transition-all active:scale-[0.98]"
-                  >
-                    取消
-                  </button>
-                )}
-              </div>
-
-              <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground h-4">
-                {polling ? (
-                  <>
-                    <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-                    等待授权完成...
-                  </>
-                ) : (
-                  <span className="text-center">{authMessage}</span>
-                )}
-              </div>
-            </div>
-          )}
-
-          <div className="flex items-center justify-center gap-2 pt-1">
-            <input
-              type="checkbox"
-              id="rememberMe"
-              checked={rememberMe}
-              onChange={(e) => setRememberMe(e.target.checked)}
-              className="h-3.5 w-3.5 rounded border-border text-primary focus:ring-2 focus:ring-primary/20 cursor-pointer accent-primary transition-all"
-            />
-            <label
-              htmlFor="rememberMe"
-              className="text-xs text-muted-foreground cursor-pointer select-none hover:text-foreground transition-colors"
-            >
-              保持登录状态
-            </label>
-          </div>
-
-          {error && (
-            <div className="rounded-xl bg-destructive/10 border border-destructive/20 px-3 py-2.5 animate-in fade-in zoom-in-95 duration-200">
-              <p className="text-xs text-center text-destructive font-medium">{error}</p>
-            </div>
-          )}
-        </div>
-
-        {/* 底部链接 */}
-        {!authSession && (
-          <div className="px-6 py-3 bg-muted/20 border-t border-border/50">
-            <p className="text-xs text-center text-muted-foreground">
-              还没有账号？{" "}
-              <button
-                onClick={() => openUrl("https://www.chmlfrp.net")}
-                className="text-primary font-medium hover:underline transition-all"
-              >
-                立即注册
-              </button>
-            </p>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
 
   if (mode === "classic") {
     const isFrosted = effectType === "frosted";
@@ -633,9 +456,10 @@ export function Sidebar({
             onClick={() => {
               if (user) {
                 setUserMenuOpen((v) => !v);
+              } else if (polling) {
+                cancelLoginPolling();
               } else {
-                setError("");
-                setLoginOpen(true);
+                void startBrowserLogin();
               }
             }}
           >
@@ -645,6 +469,10 @@ export function Sidebar({
                 alt={user.username}
                 className="h-10 w-10 rounded-xl object-cover ring-2 ring-primary/10 group-hover:ring-primary/20 transition-all"
               />
+            ) : polling ? (
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center shadow-sm">
+                <span className="h-5 w-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+              </div>
             ) : (
               <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-muted to-muted/80 flex items-center justify-center shadow-sm group-hover:shadow transition-shadow">
                 <LogIn className="w-5 h-5 text-muted-foreground" />
@@ -655,7 +483,11 @@ export function Sidebar({
                 {user?.username ?? "未登录"}
               </h1>
               <p className="text-[11px] text-muted-foreground truncate">
-                {user?.usergroup ?? "点击登录"}
+                {user
+                  ? user.usergroup
+                  : polling
+                    ? `等待授权中... ${formatCountdown(remainingSeconds)}`
+                    : "点击登录"}
               </p>
             </div>
           </button>
@@ -673,7 +505,7 @@ export function Sidebar({
                   onClick={() => {
                     onUserChange(null);
                     setUserMenuOpen(false);
-                    clearStoredUser();
+                    logoutWithProxyToken();
                     onTabChange("node-test");
                   }}
                 >
@@ -684,7 +516,6 @@ export function Sidebar({
             </div>
           )}
         </div>
-        {LoginDialog}
       </div>
     );
   }
@@ -891,9 +722,10 @@ export function Sidebar({
                     }
                   }
                   setUserMenuOpen((v) => !v);
+                } else if (polling) {
+                  cancelLoginPolling();
                 } else {
-                  setError("");
-                  setLoginOpen(true);
+                  void startBrowserLogin();
                 }
               }}
             >
@@ -904,6 +736,10 @@ export function Sidebar({
                     alt={user.username}
                     className="h-10 w-10 rounded-xl object-cover ring-2 ring-primary/10 group-hover:ring-primary/20 transition-all"
                   />
+                ) : polling ? (
+                  <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center shadow-sm">
+                    <span className="h-5 w-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                  </div>
                 ) : (
                   <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-muted to-muted/80 flex items-center justify-center shadow-sm group-hover:shadow transition-shadow">
                     <LogIn className="w-5 h-5 text-muted-foreground" />
@@ -922,7 +758,11 @@ export function Sidebar({
                   {user?.username ?? "未登录"}
                 </h1>
                 <p className="text-[11px] text-muted-foreground truncate">
-                  {user?.usergroup ?? "点击登录"}
+                  {user
+                    ? user.usergroup
+                    : polling
+                      ? `等待授权中... ${formatCountdown(remainingSeconds)}`
+                      : "点击登录"}
                 </p>
               </div>
             </button>
@@ -964,7 +804,7 @@ export function Sidebar({
                     onClick={() => {
                       onUserChange(null);
                       setUserMenuOpen(false);
-                      clearStoredUser();
+                      logoutWithProxyToken();
                       onTabChange("node-test");
                       if (mode === "floating" || mode === "floating_fixed") {
                         setCollapsedState(true);
@@ -980,7 +820,6 @@ export function Sidebar({
           </div>
         </div>
       </div>
-      {LoginDialog}
     </>
   );
 }

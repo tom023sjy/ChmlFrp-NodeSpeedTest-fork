@@ -13,7 +13,10 @@ pub mod ddns;
 pub mod ddns_task;
 pub mod ddns_monitor;
 pub mod ssl_manager;
+pub mod secure_storage;
+pub mod system_info;
 pub mod window;
+pub mod relay_commands;
 
 pub use http::*;
 pub use tcping::*;
@@ -29,4 +32,7 @@ pub use ddns::*;
 pub use ddns_task::*;
 pub use ddns_monitor::*;
 pub use ssl_manager::*;
+pub use secure_storage::*;
+pub use system_info::*;
 pub use window::*;
+pub use relay_commands::*;

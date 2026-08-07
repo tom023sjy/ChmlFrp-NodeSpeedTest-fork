@@ -13,8 +13,8 @@ import {
 import { AppearanceSection } from "./components/AppearanceSection";
 import { UpdateSection } from "./components/UpdateSection";
 import { GeneralSection } from "./components/GeneralSection";
+import { InterconnectSection } from "./components/InterconnectSection";
 import { MaintenanceSection } from "./components/MaintenanceSection";
-import { AboutSection } from "./components/AboutSection";
 import { UpdateDialog } from "@/components/dialogs/UpdateDialog";
 import { updateService, type UpdateInfo } from "@/services/updateService";
 import { toast } from "sonner";
@@ -231,9 +231,9 @@ export function Settings({
 
       <GeneralSection />
 
-      <MaintenanceSection />
+      <InterconnectSection />
 
-      <AboutSection currentVersion={currentVersion} />
+      <MaintenanceSection />
       </div>
 
       <UpdateDialog

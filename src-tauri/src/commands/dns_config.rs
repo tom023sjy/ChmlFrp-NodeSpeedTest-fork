@@ -1,11 +1,12 @@
-// DNS 容灾配置与日志的本地 JSON 存储
-// 文件结构：data/dns-failover/{credentials.json, tasks.json, logs.json}
-use crate::utils::get_app_data_dir;
+// DNS 容灾配置与日志存储（SQLite 数据库 + 敏感字段加密）
+// 数据表：dns_credentials / dns_tasks / dns_logs（建表脚本位于 db.rs）
+// 敏感字段（secret_id/secret_key/token/api_token/user_token）经 crypto.rs 加密后入库
+use crate::crypto;
+use crate::db;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Mutex;
 
-use super::dns_provider::{verify_credential, DnsCredential};
+use super::dns_provider::{verify_credential, DnsCredential, DnsProviderKind};
 
 /// 一个隧道目标（用于匹配监控的隧道与切换目标）
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,49 +133,106 @@ pub struct DnsSwitchLog {
     pub owner_username: String,
 }
 
-pub const CREDENTIALS_FILE: &str = "dns-credentials.json";
-const TASKS_FILE: &str = "dns-tasks.json";
-const LOGS_FILE: &str = "dns-logs.json";
-
-pub fn dns_data_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let base = get_app_data_dir(app_handle)?;
-    let dir = base.join("dns-failover");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 DNS 配置目录失败: {}", e))?;
-    Ok(dir)
-}
-
-pub fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf, default: T) -> T {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(default)
-}
-
-fn write_json<T: Serialize>(path: &PathBuf, data: &T) -> Result<(), String> {
-    let content = serde_json::to_string_pretty(data).map_err(|e| format!("序列化失败: {}", e))?;
-    std::fs::write(path, content).map_err(|e| format!("写入文件失败: {}", e))
-}
-
 // ===== 凭证管理命令 =====
 
+/// 从 rusqlite 行构造 DnsCredential，自动解密 secret_id/secret_key/token/api_token
+fn credential_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DnsCredential> {
+    let secret_id_enc: String = row.get("secret_id")?;
+    let secret_key_enc: String = row.get("secret_key")?;
+    let token_enc: String = row.get("token")?;
+    let api_token_enc: String = row.get("api_token")?;
+    let provider_str: String = row.get("provider")?;
+    let provider: DnsProviderKind =
+        serde_json::from_str(&provider_str).unwrap_or(DnsProviderKind::DnspodCn);
+    Ok(DnsCredential {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        provider,
+        secret_id: crypto::decrypt_string(&secret_id_enc).unwrap_or_default(),
+        secret_key: crypto::decrypt_string(&secret_key_enc).unwrap_or_default(),
+        token: crypto::decrypt_string(&token_enc).unwrap_or_default(),
+        api_token: crypto::decrypt_string(&api_token_enc).unwrap_or_default(),
+        owner_username: row.get("owner_username")?,
+    })
+}
+
+/// 凭证查询字段列表（与 credential_from_row 保持一致）
+const CREDENTIAL_COLUMNS: &str = "id, name, provider, secret_id, secret_key, token, api_token, owner_username";
+
 /// 读取所有凭证（调度器内部使用，不限用户）
-pub fn list_all_credentials(app_handle: &tauri::AppHandle) -> Result<Vec<DnsCredential>, String> {
-    let path = dns_data_dir(app_handle)?.join(CREDENTIALS_FILE);
-    Ok(read_json(&path, Vec::new()))
+pub fn list_all_credentials(_app_handle: &tauri::AppHandle) -> Result<Vec<DnsCredential>, String> {
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(&format!("SELECT {} FROM dns_credentials", CREDENTIAL_COLUMNS))
+        .map_err(|e| format!("查询凭证失败: {}", e))?;
+    let rows = stmt
+        .query_map([], credential_from_row)
+        .map_err(|e| format!("读取凭证失败: {}", e))?;
+    let mut list = Vec::new();
+    for row in rows {
+        if let Ok(c) = row {
+            list.push(c);
+        }
+    }
+    Ok(list)
+}
+
+/// 读取所有任务（调度器内部使用，不限用户）
+pub fn list_all_tasks(_app_handle: &tauri::AppHandle) -> Result<Vec<DnsMonitorTask>, String> {
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(&format!("SELECT {} FROM dns_tasks", TASK_COLUMNS))
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    let rows = stmt
+        .query_map([], task_from_row)
+        .map_err(|e| format!("读取任务失败: {}", e))?;
+    let mut list = Vec::new();
+    for row in rows {
+        if let Ok(t) = row {
+            list.push(t);
+        }
+    }
+    Ok(list)
+}
+
+/// 按 ID 读取单个任务（调度器内部使用）
+pub fn get_task_by_id(_app_handle: &tauri::AppHandle, task_id: &str) -> Result<Option<DnsMonitorTask>, String> {
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(&format!("SELECT {} FROM dns_tasks WHERE id = ?", TASK_COLUMNS))
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    let mut rows = stmt
+        .query_map([&task_id], task_from_row)
+        .map_err(|e| format!("读取任务失败: {}", e))?;
+    if let Some(row) = rows.next() {
+        Ok(Some(row.map_err(|e| e.to_string())?))
+    } else {
+        Ok(None)
+    }
 }
 
 #[tauri::command]
 pub async fn list_dns_credentials(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
 ) -> Result<Vec<DnsCredential>, String> {
-    let path = dns_data_dir(&app_handle)?.join(CREDENTIALS_FILE);
-    let list: Vec<DnsCredential> = read_json(&path, Vec::new());
-    // 账号隔离：owner_username 为空（旧数据）或等于当前用户的凭证可见
-    Ok(list
-        .into_iter()
-        .filter(|c| c.owner_username.is_empty() || c.owner_username == username)
-        .collect())
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {} FROM dns_credentials WHERE owner_username = ? OR owner_username = ''",
+            CREDENTIAL_COLUMNS
+        ))
+        .map_err(|e| format!("查询凭证失败: {}", e))?;
+    let rows = stmt
+        .query_map([&username], credential_from_row)
+        .map_err(|e| format!("读取凭证失败: {}", e))?;
+    let mut list = Vec::new();
+    for row in rows {
+        if let Ok(c) = row {
+            list.push(c);
+        }
+    }
+    Ok(list)
 }
 
 /// 验证 DNS 凭证是否有效（执行一次轻量级「列出域名」调用）
@@ -186,151 +244,344 @@ pub async fn dns_verify_credential(credential: DnsCredential) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn save_dns_credential(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
     credential: DnsCredential,
 ) -> Result<DnsCredential, String> {
-    let path = dns_data_dir(&app_handle)?.join(CREDENTIALS_FILE);
-    let mut list: Vec<DnsCredential> = read_json(&path, Vec::new());
-
+    let conn = db::get_conn()?;
     // 强制设置 owner 为当前用户
     let mut credential = credential;
     credential.owner_username = username.clone();
 
-    if let Some(idx) = list.iter().position(|c| c.id == credential.id) {
-        // 验证 owner：只能修改自己的凭证（旧数据 owner 为空时允许认领）
-        if !list[idx].owner_username.is_empty() && list[idx].owner_username != username {
+    // 验证 owner：只能修改自己的凭证（旧数据 owner 为空时允许认领）
+    let existing_owner: Option<String> = conn
+        .query_row(
+            "SELECT owner_username FROM dns_credentials WHERE id = ?",
+            [&credential.id],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(owner) = existing_owner {
+        if !owner.is_empty() && owner != username {
             return Err("无权修改此凭证".to_string());
         }
-        list[idx] = credential.clone();
-    } else {
-        list.push(credential.clone());
     }
-    write_json(&path, &list)?;
+
+    // 加密敏感字段
+    let secret_id = crypto::encrypt_string(&credential.secret_id)?;
+    let secret_key = crypto::encrypt_string(&credential.secret_key)?;
+    let token = crypto::encrypt_string(&credential.token)?;
+    let api_token = crypto::encrypt_string(&credential.api_token)?;
+    // provider 枚举序列化为 JSON 字符串（如 "dnspodCn"）
+    let provider = serde_json::to_string(&credential.provider)
+        .map_err(|e| format!("序列化 provider 失败: {}", e))?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO dns_credentials \
+         (id, name, provider, secret_id, secret_key, token, api_token, owner_username) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &credential.id,
+            &credential.name,
+            &provider,
+            &secret_id,
+            &secret_key,
+            &token,
+            &api_token,
+            &credential.owner_username,
+        ],
+    )
+    .map_err(|e| format!("保存凭证失败: {}", e))?;
+
     Ok(credential)
 }
 
 #[tauri::command]
 pub async fn delete_dns_credential(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
     id: String,
 ) -> Result<(), String> {
-    let path = dns_data_dir(&app_handle)?.join(CREDENTIALS_FILE);
-    let mut list: Vec<DnsCredential> = read_json(&path, Vec::new());
+    let conn = db::get_conn()?;
     // 验证 owner：只能删除自己的凭证（旧数据 owner 为空时允许删除）
-    if let Some(c) = list.iter().find(|c| c.id == id) {
-        if !c.owner_username.is_empty() && c.owner_username != username {
+    let existing_owner: Option<String> = conn
+        .query_row(
+            "SELECT owner_username FROM dns_credentials WHERE id = ?",
+            [&id],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(owner) = existing_owner {
+        if !owner.is_empty() && owner != username {
             return Err("无权删除此凭证".to_string());
         }
     }
-    list.retain(|c| c.id != id);
-    write_json(&path, &list)
+    conn.execute(
+        "DELETE FROM dns_credentials WHERE id = ? AND (owner_username = '' OR owner_username = ?)",
+        rusqlite::params![&id, &username],
+    )
+    .map_err(|e| format!("删除凭证失败: {}", e))?;
+    Ok(())
 }
 
 // ===== 任务管理命令 =====
 
+/// 从 rusqlite 行构造 DnsMonitorTask，自动解密 user_token，反序列化复杂字段
+fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DnsMonitorTask> {
+    let user_token_enc: String = row.get("user_token")?;
+    let primary_tunnel_str: String = row.get("primary_tunnel")?;
+    let backup_tunnels_str: String = row.get("backup_tunnels")?;
+    let check_methods_str: String = row.get("check_methods")?;
+    let enabled: i64 = row.get("enabled")?;
+
+    Ok(DnsMonitorTask {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        enabled: enabled != 0,
+        user_token: crypto::decrypt_string(&user_token_enc).unwrap_or_default(),
+        credential_id: row.get("credential_id")?,
+        domain: row.get("domain")?,
+        subdomain: row.get("subdomain")?,
+        primary_tunnel: serde_json::from_str(&primary_tunnel_str).unwrap_or_else(|_| TunnelTarget {
+            tunnel_name: String::new(),
+            cname_value: String::new(),
+            note: String::new(),
+        }),
+        backup_tunnels: serde_json::from_str(&backup_tunnels_str).unwrap_or_default(),
+        fail_threshold: row.get("fail_threshold")?,
+        recover_threshold: row.get("recover_threshold")?,
+        poll_interval_secs: row.get("poll_interval_secs")?,
+        check_methods: serde_json::from_str(&check_methods_str)
+            .unwrap_or_else(|_| default_check_methods()),
+        fail_method_threshold: row.get("fail_method_threshold")?,
+        tcping_timeout_secs: row.get("tcping_timeout_secs")?,
+        owner_username: row.get("owner_username")?,
+    })
+}
+
+/// 任务查询字段列表（与 task_from_row 保持一致）
+const TASK_COLUMNS: &str = "id, name, enabled, user_token, credential_id, domain, subdomain, \
+     primary_tunnel, backup_tunnels, fail_threshold, recover_threshold, \
+     poll_interval_secs, check_methods, fail_method_threshold, tcping_timeout_secs, owner_username";
+
 #[tauri::command]
 pub async fn list_dns_tasks(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
 ) -> Result<Vec<DnsMonitorTask>, String> {
-    let path = dns_data_dir(&app_handle)?.join(TASKS_FILE);
-    let list: Vec<DnsMonitorTask> = read_json(&path, Vec::new());
-    // 账号隔离：owner_username 为空（旧数据）或等于当前用户的任务可见
-    Ok(list
-        .into_iter()
-        .filter(|t| t.owner_username.is_empty() || t.owner_username == username)
-        .collect())
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {} FROM dns_tasks WHERE owner_username = ? OR owner_username = ''",
+            TASK_COLUMNS
+        ))
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    let rows = stmt
+        .query_map([&username], task_from_row)
+        .map_err(|e| format!("读取任务失败: {}", e))?;
+    let mut list = Vec::new();
+    for row in rows {
+        if let Ok(t) = row {
+            list.push(t);
+        }
+    }
+    Ok(list)
 }
 
 #[tauri::command]
 pub async fn save_dns_task(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
     task: DnsMonitorTask,
 ) -> Result<DnsMonitorTask, String> {
-    let path = dns_data_dir(&app_handle)?.join(TASKS_FILE);
-    let mut list: Vec<DnsMonitorTask> = read_json(&path, Vec::new());
+    let conn = db::get_conn()?;
     // 强制设置 owner 为当前用户
     let mut task = task;
     task.owner_username = username.clone();
 
-    if let Some(idx) = list.iter().position(|t| t.id == task.id) {
-        // 验证 owner：只能修改自己的任务（旧数据 owner 为空时允许认领）
-        if !list[idx].owner_username.is_empty() && list[idx].owner_username != username {
+    // 验证 owner：只能修改自己的任务（旧数据 owner 为空时允许认领）
+    let existing_owner: Option<String> = conn
+        .query_row(
+            "SELECT owner_username FROM dns_tasks WHERE id = ?",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(owner) = existing_owner {
+        if !owner.is_empty() && owner != username {
             return Err("无权修改此任务".to_string());
         }
-        list[idx] = task.clone();
-    } else {
-        list.push(task.clone());
     }
-    write_json(&path, &list)?;
+
+    // 加密 user_token
+    let user_token = crypto::encrypt_string(&task.user_token)?;
+    // 序列化复杂字段为 JSON 字符串
+    let primary_tunnel = serde_json::to_string(&task.primary_tunnel)
+        .map_err(|e| format!("序列化 primary_tunnel 失败: {}", e))?;
+    let backup_tunnels = serde_json::to_string(&task.backup_tunnels)
+        .map_err(|e| format!("序列化 backup_tunnels 失败: {}", e))?;
+    let check_methods = serde_json::to_string(&task.check_methods)
+        .map_err(|e| format!("序列化 check_methods 失败: {}", e))?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO dns_tasks \
+         (id, name, enabled, user_token, credential_id, domain, subdomain, \
+          primary_tunnel, backup_tunnels, fail_threshold, recover_threshold, \
+          poll_interval_secs, check_methods, fail_method_threshold, \
+          tcping_timeout_secs, owner_username) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &task.id,
+            &task.name,
+            if task.enabled { 1 } else { 0 },
+            &user_token,
+            &task.credential_id,
+            &task.domain,
+            &task.subdomain,
+            &primary_tunnel,
+            &backup_tunnels,
+            task.fail_threshold as i64,
+            task.recover_threshold as i64,
+            task.poll_interval_secs as i64,
+            &check_methods,
+            task.fail_method_threshold as i64,
+            task.tcping_timeout_secs as i64,
+            &task.owner_username,
+        ],
+    )
+    .map_err(|e| format!("保存任务失败: {}", e))?;
+
     Ok(task)
 }
 
 #[tauri::command]
 pub async fn delete_dns_task(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
     id: String,
 ) -> Result<(), String> {
-    let path = dns_data_dir(&app_handle)?.join(TASKS_FILE);
-    let mut list: Vec<DnsMonitorTask> = read_json(&path, Vec::new());
+    let conn = db::get_conn()?;
     // 验证 owner：只能删除自己的任务（旧数据 owner 为空时允许删除）
-    if let Some(t) = list.iter().find(|t| t.id == id) {
-        if !t.owner_username.is_empty() && t.owner_username != username {
+    let existing_owner: Option<String> = conn
+        .query_row(
+            "SELECT owner_username FROM dns_tasks WHERE id = ?",
+            [&id],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(owner) = existing_owner {
+        if !owner.is_empty() && owner != username {
             return Err("无权删除此任务".to_string());
         }
     }
-    list.retain(|t| t.id != id);
-    write_json(&path, &list)
+    conn.execute(
+        "DELETE FROM dns_tasks WHERE id = ? AND (owner_username = '' OR owner_username = ?)",
+        rusqlite::params![&id, &username],
+    )
+    .map_err(|e| format!("删除任务失败: {}", e))?;
+    Ok(())
 }
 
 // ===== 日志管理命令 =====
 
+/// 从 rusqlite 行构造 DnsSwitchLog
+fn log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DnsSwitchLog> {
+    let success: i64 = row.get("success")?;
+    Ok(DnsSwitchLog {
+        id: row.get("id")?,
+        task_id: row.get("task_id")?,
+        task_name: row.get("task_name")?,
+        kind: row.get("kind")?,
+        from_tunnel: row.get("from_tunnel")?,
+        to_tunnel: row.get("to_tunnel")?,
+        cname_value: row.get("cname_value")?,
+        success: success != 0,
+        message: row.get("message")?,
+        time: row.get("time")?,
+        owner_username: row.get("owner_username")?,
+    })
+}
+
 #[tauri::command]
 pub async fn list_dns_logs(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
 ) -> Result<Vec<DnsSwitchLog>, String> {
-    let path = dns_data_dir(&app_handle)?.join(LOGS_FILE);
-    let mut logs: Vec<DnsSwitchLog> = read_json(&path, Vec::new());
-    // 账号隔离：只返回当前用户的日志（旧数据 owner 为空时也可见）
-    logs.retain(|l| l.owner_username.is_empty() || l.owner_username == username);
-    // 按时间倒序
-    logs.sort_by(|a, b| b.time.cmp(&a.time));
-    // 最多保留 500 条
-    if logs.len() > 500 {
-        logs.truncate(500);
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, task_id, task_name, kind, from_tunnel, to_tunnel, \
+                    cname_value, success, message, time, owner_username \
+             FROM dns_logs \
+             WHERE owner_username = ? OR owner_username = '' \
+             ORDER BY time DESC LIMIT 500",
+        )
+        .map_err(|e| format!("查询日志失败: {}", e))?;
+    let rows = stmt
+        .query_map([&username], log_from_row)
+        .map_err(|e| format!("读取日志失败: {}", e))?;
+    let mut list = Vec::new();
+    for row in rows {
+        if let Ok(l) = row {
+            list.push(l);
+        }
     }
-    Ok(logs)
+    Ok(list)
 }
 
 #[tauri::command]
 pub async fn clear_dns_logs(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
 ) -> Result<(), String> {
-    let path = dns_data_dir(&app_handle)?.join(LOGS_FILE);
+    let conn = db::get_conn()?;
     // 仅清空当前用户的日志，保留其他用户的日志
-    let mut logs: Vec<DnsSwitchLog> = read_json(&path, Vec::new());
-    logs.retain(|l| !l.owner_username.is_empty() && l.owner_username != username);
-    write_json(&path, &logs)
+    conn.execute(
+        "DELETE FROM dns_logs WHERE owner_username = ?",
+        [&username],
+    )
+    .map_err(|e| format!("清空日志失败: {}", e))?;
+    Ok(())
 }
 
 /// 内部接口：追加一条日志（不导出为 Tauri 命令）
-pub fn append_log(app_handle: &tauri::AppHandle, log: DnsSwitchLog) {
-    if let Ok(path) = dns_data_dir(app_handle).map(|d| d.join(LOGS_FILE)) {
-        let mut logs: Vec<DnsSwitchLog> = read_json(&path, Vec::new());
-        logs.push(log);
-        // 保留最近 500 条
-        if logs.len() > 500 {
-            let start = logs.len() - 500;
-            logs = logs.split_off(start);
-        }
-        let _ = write_json(&path, &logs);
+/// 写入失败仅打印日志，不向上传递错误（避免影响监控主流程）
+pub fn append_log(_app_handle: &tauri::AppHandle, log: DnsSwitchLog) {
+    if let Err(e) = append_log_inner(&log) {
+        eprintln!("写入 DNS 日志失败: {}", e);
     }
+}
+
+fn append_log_inner(log: &DnsSwitchLog) -> Result<(), String> {
+    let conn = db::get_conn()?;
+    conn.execute(
+        "INSERT INTO dns_logs \
+         (id, task_id, task_name, kind, from_tunnel, to_tunnel, cname_value, \
+          success, message, time, owner_username) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &log.id,
+            &log.task_id,
+            &log.task_name,
+            &log.kind,
+            &log.from_tunnel,
+            &log.to_tunnel,
+            &log.cname_value,
+            if log.success { 1 } else { 0 },
+            &log.message,
+            &log.time,
+            &log.owner_username,
+        ],
+    )
+    .map_err(|e| format!("插入日志失败: {}", e))?;
+    // 保留最近 500 条，避免日志无限增长
+    conn.execute(
+        "DELETE FROM dns_logs WHERE id NOT IN \
+         (SELECT id FROM dns_logs ORDER BY time DESC LIMIT 500)",
+        [],
+    )
+    .map_err(|e| format!("清理旧日志失败: {}", e))?;
+    Ok(())
 }
 
 /// 内部接口：生成简易 ID（时间戳 + 随机后缀）
@@ -373,21 +624,33 @@ pub async fn set_user_token(
 
 #[tauri::command]
 pub async fn list_dns_runtime(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
     state: tauri::State<'_, DnsRuntimeState>,
 ) -> Result<std::collections::HashMap<String, TaskRuntime>, String> {
+    // 任务列表改为从 DB 读取（已按 owner_username 过滤）
     let tasks: Vec<DnsMonitorTask> = {
-        let path = dns_data_dir(&app_handle)?.join(TASKS_FILE);
-        read_json(&path, Vec::new())
+        let conn = db::get_conn()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {} FROM dns_tasks WHERE owner_username = ? OR owner_username = ''",
+                TASK_COLUMNS
+            ))
+            .map_err(|e| format!("查询任务失败: {}", e))?;
+        let rows = stmt
+            .query_map([&username], task_from_row)
+            .map_err(|e| format!("读取任务失败: {}", e))?;
+        let mut list = Vec::new();
+        for row in rows {
+            if let Ok(t) = row {
+                list.push(t);
+            }
+        }
+        list
     };
     let guard = state.0.lock().map_err(|e| format!("获取运行时锁失败: {}", e))?;
     let mut result = std::collections::HashMap::new();
     for task in tasks {
-        // 账号隔离：只返回当前用户的 task runtime
-        if !task.owner_username.is_empty() && task.owner_username != username {
-            continue;
-        }
         let rt = guard
             .get(&task.id)
             .cloned()
@@ -430,7 +693,7 @@ pub async fn dns_list_all_txt_records(
 ) -> Result<Vec<TxtRecordItem>, String> {
     let mut items = Vec::new();
 
-    // 1. 遍历用户的所有 DNS 凭证
+    // 1. 遍历用户的所有 DNS 凭证（list_all_credentials 已适配 DB 版本，内部自动解密）
     let creds = list_all_credentials(&app_handle)?
         .into_iter()
         .filter(|c| c.owner_username.is_empty() || c.owner_username == username)

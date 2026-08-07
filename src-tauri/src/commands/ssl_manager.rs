@@ -2,13 +2,12 @@
 // 通过 cf-v2.uapis.cn/ssl/* API 实现，使用 DNS-01 验证
 // 支持 ChmlFrp 免费域名（用 accessToken）和自有域名（用 DNS 凭证自动添加 TXT 记录）
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 
 use super::dns_config::{self, UserTokenState};
 use super::dns_provider::{self, DnsCredential, DnsProviderKind};
-use crate::utils::get_app_data_dir;
+use crate::db;
 
 const SSL_API_BASE: &str = "https://cf-v2.uapis.cn";
 
@@ -711,8 +710,6 @@ pub async fn ssl_auto_request_async(
 
 // ===== SSL 申请日志持久化（按账号隔离）=====
 
-const SSL_LOGS_FILE: &str = "ssl-logs.json";
-
 /// 一条历史申请日志
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -736,72 +733,84 @@ pub struct SslRequestLog {
     pub owner_username: String,
 }
 
-fn ssl_logs_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let base = get_app_data_dir(app_handle)?;
-    let dir = base.join("ssl");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 SSL 日志目录失败: {}", e))?;
-    Ok(dir.join(SSL_LOGS_FILE))
-}
-
-fn read_logs_json(path: &PathBuf) -> Vec<SslRequestLog> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn write_logs_json(path: &PathBuf, data: &Vec<SslRequestLog>) -> Result<(), String> {
-    let content = serde_json::to_string_pretty(data).map_err(|e| format!("序列化失败: {}", e))?;
-    std::fs::write(path, content).map_err(|e| format!("写入文件失败: {}", e))
-}
-
 /// 保存一条申请日志（前端在申请完成时调用）
 #[tauri::command]
 pub async fn ssl_save_log(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     log: SslRequestLog,
 ) -> Result<(), String> {
-    let path = ssl_logs_path(&app_handle)?;
-    let mut list = read_logs_json(&path);
-    // 同 ID 覆盖
-    list.retain(|l| l.id != log.id);
-    list.push(log);
-    // 按完成时间倒序（新的在前）
-    list.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
-    // 限制最多保留 200 条，避免无限增长
-    if list.len() > 200 {
-        list.truncate(200);
-    }
-    write_logs_json(&path, &list)
+    let conn = db::get_conn()?;
+    // logs 字段为 Vec<String>，序列化为 JSON 字符串存储
+    let logs_json = serde_json::to_string(&log.logs)
+        .map_err(|e| format!("序列化日志失败: {}", e))?;
+    // 同 ID 覆盖（INSERT OR REPLACE）
+    conn.execute(
+        "INSERT OR REPLACE INTO ssl_logs (id, domains, provider, final_status, logs, created_at, finished_at, owner_username) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            log.id,
+            log.domains,
+            log.provider,
+            log.final_status,
+            logs_json,
+            log.created_at,
+            log.finished_at,
+            log.owner_username,
+        ],
+    )
+    .map_err(|e| format!("保存 SSL 日志失败: {}", e))?;
+    Ok(())
 }
 
 /// 列出当前用户的所有申请日志
 #[tauri::command]
 pub async fn ssl_list_logs(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
 ) -> Result<Vec<SslRequestLog>, String> {
-    let path = ssl_logs_path(&app_handle)?;
-    let list = read_logs_json(&path);
-    // 账号隔离：owner_username 为空（旧数据）或等于当前用户可见
-    Ok(list
-        .into_iter()
-        .filter(|l| l.owner_username.is_empty() || l.owner_username == username)
-        .collect())
+    let conn = db::get_conn()?;
+    // 账号隔离：owner_username 为空（旧数据）或等于当前用户可见，按创建时间倒序，最多 200 条
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, domains, provider, final_status, logs, created_at, finished_at, owner_username FROM ssl_logs WHERE owner_username = ?1 OR owner_username = '' ORDER BY created_at DESC LIMIT 200",
+        )
+        .map_err(|e| format!("查询 SSL 日志失败: {}", e))?;
+    let rows = stmt
+        .query_map(rusqlite::params![username], |row| {
+            // logs 字段从 JSON 字符串反序列化为 Vec<String>
+            let logs_json: String = row.get("logs")?;
+            let logs: Vec<String> = serde_json::from_str(&logs_json).unwrap_or_default();
+            // finished_at 在数据库中可为 NULL，对应空字符串
+            let finished_at: String = row
+                .get::<_, Option<String>>("finished_at")?
+                .unwrap_or_default();
+            Ok(SslRequestLog {
+                id: row.get("id")?,
+                domains: row.get("domains")?,
+                provider: row.get("provider")?,
+                final_status: row.get("final_status")?,
+                logs,
+                created_at: row.get("created_at")?,
+                finished_at,
+                owner_username: row.get("owner_username")?,
+            })
+        })
+        .map_err(|e| format!("读取 SSL 日志失败: {}", e))?;
+    let mut list = Vec::new();
+    for row in rows {
+        list.push(row.map_err(|e| format!("解析 SSL 日志行失败: {}", e))?);
+    }
+    Ok(list)
 }
 
 /// 清空当前用户的所有申请日志
 #[tauri::command]
 pub async fn ssl_clear_logs(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     username: String,
 ) -> Result<(), String> {
-    let path = ssl_logs_path(&app_handle)?;
-    let list = read_logs_json(&path);
-    // 仅保留其他用户的日志
-    let remaining: Vec<SslRequestLog> = list
-        .into_iter()
-        .filter(|l| !l.owner_username.is_empty() && l.owner_username != username)
-        .collect();
-    write_logs_json(&path, &remaining)
+    let conn = db::get_conn()?;
+    // 仅删除当前用户的日志，保留其他用户的日志
+    conn.execute("DELETE FROM ssl_logs WHERE owner_username = ?1", rusqlite::params![username])
+        .map_err(|e| format!("清空 SSL 日志失败: {}", e))?;
+    Ok(())
 }

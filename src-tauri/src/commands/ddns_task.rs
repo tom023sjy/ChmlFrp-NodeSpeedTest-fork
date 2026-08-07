@@ -1,13 +1,12 @@
 // DDNS 动态解析任务配置与存储
 // 任务结构包含：目标域名、监听网卡、调度模式（定时/分时段间隔）、启用状态、运行时状态
-// 数据按账号隔离，存储于 ddns/tasks.json，日志存储于 ddns/logs.json
-use std::path::PathBuf;
-
+// 数据按账号隔离，存储于 SQLite 数据库（ddns_tasks / ddns_logs 表）
 use chrono::{DateTime, Local, Utc};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use super::dns_config::{dns_data_dir, read_json};
+use crate::db;
 
 /// 调度模式
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,142 +130,309 @@ pub struct DdnsLog {
     pub owner_username: String,
 }
 
-const TASKS_FILE: &str = "ddns-tasks.json";
-const LOGS_FILE: &str = "ddns-logs.json";
-const MAX_LOGS: usize = 500;
+/// 日志保留上限
+const MAX_LOGS: i64 = 500;
 
-fn write_json<T: Serialize + ?Sized>(path: &PathBuf, data: &T) -> Result<(), String> {
-    let content = serde_json::to_string_pretty(data).map_err(|e| format!("序列化失败: {}", e))?;
-    std::fs::write(path, content).map_err(|e| format!("写入文件失败: {}", e))
+// ===== 内部辅助：数据库行读取 =====
+
+/// 从数据库行按列名读取一个值，错误统一转换为 String
+fn get_col<T: rusqlite::types::FromSql>(row: &rusqlite::Row, name: &str) -> Result<T, String> {
+    row.get::<_, T>(name)
+        .map_err(|e| format!("读取字段 {} 失败: {}", name, e))
 }
 
-pub fn ddns_tasks_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    Ok(dns_data_dir(app_handle)?.join(TASKS_FILE))
+/// 任务表查询的字段列表（与 row_to_task 对应）
+const TASK_COLUMNS: &str = "id, name, domain, record, record_type, credential_source, interface, \
+     schedule, enabled, last_check, last_ip, last_updated_ip, last_message, owner_username";
+
+/// 将数据库行转换为 DdnsTask
+fn row_to_task(row: &rusqlite::Row) -> Result<DdnsTask, String> {
+    let cred_str: String = get_col(row, "credential_source")?;
+    let sched_str: String = get_col(row, "schedule")?;
+    let enabled: i64 = get_col(row, "enabled")?;
+    let credential_source = serde_json::from_str(&cred_str)
+        .map_err(|e| format!("解析 credential_source 失败: {}", e))?;
+    let schedule =
+        serde_json::from_str(&sched_str).map_err(|e| format!("解析 schedule 失败: {}", e))?;
+    Ok(DdnsTask {
+        id: get_col(row, "id")?,
+        name: get_col(row, "name")?,
+        domain: get_col(row, "domain")?,
+        record: get_col(row, "record")?,
+        record_type: get_col(row, "record_type")?,
+        credential_source,
+        interface: get_col(row, "interface")?,
+        schedule,
+        enabled: enabled != 0,
+        last_check: get_col(row, "last_check")?,
+        last_ip: get_col(row, "last_ip")?,
+        last_updated_ip: get_col(row, "last_updated_ip")?,
+        last_message: get_col(row, "last_message")?,
+        owner_username: get_col(row, "owner_username")?,
+    })
 }
 
-pub fn ddns_logs_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    Ok(dns_data_dir(app_handle)?.join(LOGS_FILE))
+/// 插入或替换一条任务（全量字段）
+fn upsert_task(conn: &rusqlite::Connection, task: &DdnsTask) -> Result<(), String> {
+    let cred_str = serde_json::to_string(&task.credential_source)
+        .map_err(|e| format!("序列化 credential_source 失败: {}", e))?;
+    let sched_str = serde_json::to_string(&task.schedule)
+        .map_err(|e| format!("序列化 schedule 失败: {}", e))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO ddns_tasks \
+         (id, name, domain, record, record_type, credential_source, interface, schedule, \
+          enabled, last_check, last_ip, last_updated_ip, last_message, owner_username) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            task.id,
+            task.name,
+            task.domain,
+            task.record,
+            task.record_type,
+            cred_str,
+            task.interface,
+            sched_str,
+            if task.enabled { 1 } else { 0 },
+            task.last_check,
+            task.last_ip,
+            task.last_updated_ip,
+            task.last_message,
+            task.owner_username,
+        ],
+    )
+    .map_err(|e| format!("写入任务失败: {}", e))?;
+    Ok(())
+}
+
+/// 仅更新任务运行时状态字段（调度器回写用）
+fn update_task_runtime(conn: &rusqlite::Connection, task: &DdnsTask) -> Result<(), String> {
+    conn.execute(
+        "UPDATE ddns_tasks SET last_check = ?, last_ip = ?, last_updated_ip = ?, last_message = ? \
+         WHERE id = ?",
+        params![
+            task.last_check,
+            task.last_ip,
+            task.last_updated_ip,
+            task.last_message,
+            task.id,
+        ],
+    )
+    .map_err(|e| format!("更新任务状态失败: {}", e))?;
+    Ok(())
+}
+
+/// 删除某用户超过上限的旧日志，仅保留最近 MAX_LOGS 条
+fn trim_logs(conn: &rusqlite::Connection, owner_username: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM ddns_logs WHERE owner_username = ? AND id NOT IN (\
+         SELECT id FROM ddns_logs WHERE owner_username = ? ORDER BY id DESC LIMIT ?\
+         )",
+        params![owner_username, owner_username, MAX_LOGS],
+    )
+    .map_err(|e| format!("清理日志失败: {}", e))?;
+    Ok(())
 }
 
 // ===== 任务 CRUD =====
 
 #[tauri::command]
 pub async fn list_ddns_tasks(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     username: String,
 ) -> Result<Vec<DdnsTask>, String> {
-    let path = ddns_tasks_path(&app_handle)?;
-    let list: Vec<DdnsTask> = read_json(&path, Vec::new());
-    Ok(list
-        .into_iter()
-        .filter(|t| t.owner_username.is_empty() || t.owner_username == username)
-        .collect())
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {} FROM ddns_tasks WHERE owner_username = '' OR owner_username = ?",
+            TASK_COLUMNS
+        ))
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    let mut rows = stmt
+        .query(params![username])
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    let mut tasks = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取任务失败: {}", e))?
+    {
+        tasks.push(row_to_task(row)?);
+    }
+    Ok(tasks)
 }
 
 #[tauri::command]
 pub async fn save_ddns_task(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     username: String,
     task: DdnsTask,
 ) -> Result<DdnsTask, String> {
-    let path = ddns_tasks_path(&app_handle)?;
-    let mut list: Vec<DdnsTask> = read_json(&path, Vec::new());
-
+    let conn = db::get_conn()?;
     let mut task = task;
     task.owner_username = username.clone();
 
-    if let Some(idx) = list.iter().position(|t| t.id == task.id) {
-        if !list[idx].owner_username.is_empty() && list[idx].owner_username != username {
+    // 权限校验：已存在的任务仅 owner 为空（旧数据）或等于当前用户时允许修改
+    let existing_owner: Option<String> = conn
+        .query_row(
+            "SELECT owner_username FROM ddns_tasks WHERE id = ?",
+            params![task.id],
+            |row| row.get("owner_username"),
+        )
+        .optional()
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    if let Some(owner) = existing_owner {
+        if !owner.is_empty() && owner != username {
             return Err("无权修改此任务".to_string());
         }
-        list[idx] = task.clone();
-    } else {
-        list.push(task.clone());
     }
-    write_json(&path, &list)?;
+
+    upsert_task(&conn, &task)?;
     Ok(task)
 }
 
 #[tauri::command]
 pub async fn delete_ddns_task(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     username: String,
     id: String,
 ) -> Result<(), String> {
-    let path = ddns_tasks_path(&app_handle)?;
-    let mut list: Vec<DdnsTask> = read_json(&path, Vec::new());
-    if let Some(t) = list.iter().find(|t| t.id == id) {
-        if !t.owner_username.is_empty() && t.owner_username != username {
+    let conn = db::get_conn()?;
+    // 权限校验：owner 为空（旧数据）或等于当前用户时允许删除
+    let existing_owner: Option<String> = conn
+        .query_row(
+            "SELECT owner_username FROM ddns_tasks WHERE id = ?",
+            params![id],
+            |row| row.get("owner_username"),
+        )
+        .optional()
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    if let Some(owner) = existing_owner {
+        if !owner.is_empty() && owner != username {
             return Err("无权删除此任务".to_string());
         }
     }
-    list.retain(|t| t.id != id);
-    write_json(&path, &list)
+    conn.execute(
+        "DELETE FROM ddns_tasks WHERE id = ? AND (owner_username = '' OR owner_username = ?)",
+        params![id, username],
+    )
+    .map_err(|e| format!("删除任务失败: {}", e))?;
+    Ok(())
 }
 
 /// 读取所有任务（调度器使用，不限用户）
-pub fn read_all_tasks(app_handle: &AppHandle) -> Result<Vec<DdnsTask>, String> {
-    let path = ddns_tasks_path(app_handle)?;
-    Ok(read_json(&path, Vec::new()))
+pub fn read_all_tasks(_app_handle: &AppHandle) -> Result<Vec<DdnsTask>, String> {
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(&format!("SELECT {} FROM ddns_tasks", TASK_COLUMNS))
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询任务失败: {}", e))?;
+    let mut tasks = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取任务失败: {}", e))?
+    {
+        tasks.push(row_to_task(row)?);
+    }
+    Ok(tasks)
 }
 
-/// 写回任务（更新运行时状态：last_check / last_ip / last_message 等）
-pub fn write_all_tasks(app_handle: &AppHandle, tasks: &[DdnsTask]) -> Result<(), String> {
-    let path = ddns_tasks_path(app_handle)?;
-    write_json(&path, tasks)
+/// 写回任务（更新运行时状态：last_check / last_ip / last_updated_ip / last_message）
+pub fn write_all_tasks(_app_handle: &AppHandle, tasks: &[DdnsTask]) -> Result<(), String> {
+    let conn = db::get_conn()?;
+    for task in tasks {
+        update_task_runtime(&conn, task)?;
+    }
+    Ok(())
 }
 
 // ===== 日志 =====
 
 #[tauri::command]
 pub async fn list_ddns_logs(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     username: String,
 ) -> Result<Vec<DdnsLog>, String> {
-    let path = ddns_logs_path(&app_handle)?;
-    let mut logs: Vec<DdnsLog> = read_json(&path, Vec::new());
-    logs.retain(|l| l.owner_username.is_empty() || l.owner_username == username);
-    // 最新的在前
-    logs.sort_by(|a, b| b.time.cmp(&a.time));
+    let conn = db::get_conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT time, task_id, task_name, action, detected_ip, previous_ip, updated_ip, \
+             message, owner_username FROM ddns_logs \
+             WHERE owner_username = '' OR owner_username = ? \
+             ORDER BY time DESC LIMIT ?",
+        )
+        .map_err(|e| format!("查询日志失败: {}", e))?;
+    let mut rows = stmt
+        .query(params![username, MAX_LOGS])
+        .map_err(|e| format!("查询日志失败: {}", e))?;
+    let mut logs = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取日志失败: {}", e))?
+    {
+        logs.push(DdnsLog {
+            time: get_col(row, "time")?,
+            task_id: get_col(row, "task_id")?,
+            task_name: get_col(row, "task_name")?,
+            action: get_col(row, "action")?,
+            detected_ip: get_col(row, "detected_ip")?,
+            previous_ip: get_col(row, "previous_ip")?,
+            updated_ip: get_col(row, "updated_ip")?,
+            message: get_col(row, "message")?,
+            owner_username: get_col(row, "owner_username")?,
+        });
+    }
     Ok(logs)
 }
 
 #[tauri::command]
 pub async fn clear_ddns_logs(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     username: String,
 ) -> Result<(), String> {
-    let path = ddns_logs_path(&app_handle)?;
-    let logs: Vec<DdnsLog> = read_json(&path, Vec::new());
-    let retained: Vec<DdnsLog> = logs
-        .into_iter()
-        .filter(|l| !l.owner_username.is_empty() && l.owner_username != username)
-        .collect();
-    write_json(&path, &retained)
+    let conn = db::get_conn()?;
+    // 仅删除当前用户的日志，保留其他用户的日志
+    conn.execute(
+        "DELETE FROM ddns_logs WHERE owner_username = ?",
+        params![username],
+    )
+    .map_err(|e| format!("清除日志失败: {}", e))?;
+    Ok(())
 }
 
 /// 追加日志（调度器使用）
-pub fn append_log(app_handle: &AppHandle, mut log: DdnsLog) {
-    if let Ok(path) = ddns_logs_path(app_handle) {
-        log.time = Local::now().to_rfc3339();
-        let mut logs: Vec<DdnsLog> = read_json(&path, Vec::new());
-        logs.push(log);
-        // 限制日志数量
-        if logs.len() > MAX_LOGS {
-            let drop_count = logs.len() - MAX_LOGS;
-            logs.drain(0..drop_count);
-        }
-        let _ = write_json(&path, &logs);
+pub fn append_log(_app_handle: &AppHandle, mut log: DdnsLog) {
+    log.time = Local::now().to_rfc3339();
+    if let Err(e) = (|| -> Result<(), String> {
+        let conn = db::get_conn()?;
+        conn.execute(
+            "INSERT INTO ddns_logs \
+             (time, task_id, task_name, action, detected_ip, previous_ip, updated_ip, message, owner_username) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                log.time,
+                log.task_id,
+                log.task_name,
+                log.action,
+                log.detected_ip,
+                log.previous_ip,
+                log.updated_ip,
+                log.message,
+                log.owner_username,
+            ],
+        )
+        .map_err(|e| format!("写入日志失败: {}", e))?;
+        // 保留 500 条上限
+        trim_logs(&conn, &log.owner_username)?;
+        Ok(())
+    })() {
+        log::warn!("[DDNS] 追加日志失败: {}", e);
     }
 }
 
 #[allow(dead_code)]
 pub fn gen_id() -> String {
-    format!(
-        "{:x}{:x}",
-        Local::now().timestamp_millis(),
-        rand_u32()
-    )
+    format!("{:x}{:x}", Local::now().timestamp_millis(), rand_u32())
 }
 
 /// 简单伪随机（不引入 rand crate）
@@ -287,7 +453,9 @@ pub fn format_local_time(dt: DateTime<Local>) -> String {
 
 /// 解析本地时间 ISO 字符串
 pub fn parse_local_time(s: &str) -> Option<DateTime<Local>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Local))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&Local))
 }
 
 /// UTC 时间转本地时间字符串（用于调度器比较）

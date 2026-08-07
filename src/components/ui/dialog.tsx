@@ -37,6 +37,9 @@ function DialogOverlay({
       data-slot="dialog-overlay"
       className={cn(
         "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-50 bg-black/50",
+        // 强制独立合成层：避免 body 子节点（如 Select portal）增删时
+        // WebView2 重建合成层导致半透明遮罩重绘闪烁
+        "transform-gpu backface-hidden",
         className,
       )}
       {...props}
@@ -57,6 +60,9 @@ function DialogContent({
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
+        // 默认显式声明无 aria-describedby，避免未使用 DialogDescription 时触发 Radix 无障碍警告；
+        // 当 Dialog 内部包含 DialogDescription 时，Radix 会自动覆盖此值建立关联。
+        aria-describedby={undefined}
         className={cn(
           "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg duration-200 outline-none sm:max-w-lg",
           className,

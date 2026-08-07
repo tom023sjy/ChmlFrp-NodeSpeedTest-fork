@@ -44,6 +44,7 @@ import {
 import { ddnsService, type ChmlfrpAvailableDomain } from "@/services/ddnsService";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useSslProgress } from "./SslProgressContext";
+import { reportUsage } from "@/services/backendApi";
 
 interface SslManagementProps {
   user?: StoredUser | null;
@@ -314,6 +315,10 @@ export function SslManagement({ user }: SslManagementProps) {
           onStartAuto={async (params) => {
             if (!user?.username) return;
             setShowRequest(false);
+            // SSL 证书申请提交埋点：仅在用户已登录时上报，失败静默不影响主流程
+            if (user?.accessToken) {
+              reportUsage({ eventType: "ssl_request" }).catch(() => {});
+            }
             // 交给全局 Provider 托管进度状态与浮动卡片渲染
             await startRequest(params, user);
           }}

@@ -34,6 +34,7 @@ import { SpeedTestDialog, getBatchTestState, subscribeBatchTestState, requestSto
 import { BatchTestFloatingWidget } from "@/components/dialogs/BatchTestFloatingWidget";
 import { NodeHistoryDialog } from "@/components/dialogs/NodeHistoryDialog";
 import { addTestHistory } from "@/services/testHistoryService";
+import { reportUsage } from "@/services/backendApi";
 
 interface NodeTestProps {
   user: StoredUser | null;
@@ -1295,6 +1296,13 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
           // 测试有失败时不关闭弹窗，让用户看完日志
           if (!hasFailure) {
             setBatchTestNodes(null);
+          }
+          // 节点测试完成埋点：仅在用户已登录时上报，失败静默不影响主流程
+          if (user?.accessToken) {
+            reportUsage({
+              eventType: "node_test",
+              eventData: { count: results.size },
+            }).catch(() => {});
           }
         }}
       />

@@ -8,11 +8,12 @@ import {
   ItemSeparator,
 } from "@/components/ui/item";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { OFFICIAL_LINKS } from "@/lib/api-endpoints";
 
-const REPO_URL = "https://github.com/zhengddzz/ChmlFrp-Community-Toolbox";
+const REPO_URL = OFFICIAL_LINKS.github;
 const ISSUES_URL = `${REPO_URL}/issues`;
 // 历史版本更新日志（独立站，与 GitHub Releases 内容同步）
-const RELEASES_URL = "https://u.zdzz.top/app/node-selector";
+const RELEASES_URL = OFFICIAL_LINKS.historyVersions;
 
 export interface AboutSectionProps {
   /** 应用当前版本号 */
@@ -107,7 +108,7 @@ export function AboutSection({ currentVersion }: AboutSectionProps) {
           </ItemContent>
           <ItemActions>
             <button
-              onClick={() => void openUrl("https://www.chmlfrp.net")}
+              onClick={() => void openUrl(OFFICIAL_LINKS.chmlfrp)}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-foreground text-background hover:opacity-90 transition-opacity cursor-pointer"
             >
               <MessageSquare className="w-3 h-3" />
@@ -124,7 +125,7 @@ export function AboutSection({ currentVersion }: AboutSectionProps) {
           UI 设计基于{" "}
           <button
             type="button"
-            onClick={() => void openUrl("https://github.com/TechCat-Team/ChmlFrpLauncher")}
+            onClick={() => void openUrl(OFFICIAL_LINKS.chmlfrpLauncher)}
             className="text-foreground/80 hover:text-primary transition-colors"
           >
             ChmlFrpLauncher

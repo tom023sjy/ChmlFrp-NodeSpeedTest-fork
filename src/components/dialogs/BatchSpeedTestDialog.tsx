@@ -5,12 +5,14 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import { AlertCircle, CheckCircle2, Loader2, Info, AlertTriangle, Zap, Minimize2, SquareX } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, Info, AlertTriangle, Zap, Minimize2, SquareX, ShieldAlert, ExternalLink, RotateCcw } from "lucide-react";
 import { speedTestService, type SpeedTestProgress, type LogEntry } from "@/services/speedTestService";
+import { invoke } from "@tauri-apps/api/core";
 
 interface TestConfig {
   testLatency: boolean;
@@ -318,6 +320,19 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
           };
           newResults.push(nodeResult);
           addLog(`[${i + 1}/${total}] ${nodeName} 失败: ${result.error}`, "error");
+
+          // 检测到 Windows Defender 拦截 frpc：立即停止整个测速流程并弹窗提示
+          if (result.errorType === "defender_blocked") {
+            addLog("检测到 Windows Defender 实时保护拦截，已自动停止测速", "warning");
+            stopRef.current = true;
+            setIsStopping(true);
+            globalState.isStopping = true;
+            globalState.results = [...newResults];
+            setResults([...newResults]);
+            notifyListeners();
+            setShowDefenderDialog(true);
+            break;
+          }
         }
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : "测试失败";
@@ -328,6 +343,18 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
         };
         newResults.push(nodeResult);
         addLog(`[${i + 1}/${total}] ${nodeName} 异常: ${errorMsg}`, "error");
+
+        // 异常路径也检测 Defender 拦截特征（invoke 抛错时）
+        if (/os error 225|0x800700e1|病毒|垃圾软件|file contains a virus|potentially unwanted software/i.test(errorMsg)) {
+          stopRef.current = true;
+          setIsStopping(true);
+          globalState.isStopping = true;
+          globalState.results = [...newResults];
+          setResults([...newResults]);
+          notifyListeners();
+          setShowDefenderDialog(true);
+          break;
+        }
       }
 
       globalState.results = [...newResults];
@@ -368,6 +395,8 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
   const [isStopping, setIsStopping] = useState(false);
   const isMinimizingRef = useRef(false);
   const [isForceStopping, setIsForceStopping] = useState(false);
+  // Windows Defender 拦截 frpc 后的提示弹窗
+  const [showDefenderDialog, setShowDefenderDialog] = useState(false);
 
   const handleStop = useCallback(() => {
     if (stopRef.current) return; // 防止重复点击
@@ -583,6 +612,7 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
   };
 
   return (
+    <>
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
         <DialogHeader>
@@ -657,5 +687,76 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
         </div>
       </DialogContent>
     </Dialog>
+
+    {/* Windows Defender 实时保护拦截 frpc 提示弹窗 */}
+    <Dialog open={showDefenderDialog} onOpenChange={(open) => setShowDefenderDialog(open)}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ShieldAlert className="w-5 h-5 text-red-600" />
+            测速已被 Windows Defender 拦截
+          </DialogTitle>
+          <DialogDescription>
+            Windows Defender 的「实时保护」阻止了 frpc 启动，测速流程已自动停止。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3 text-sm">
+          <div className="flex items-start gap-2 p-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-lg">
+            <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+            <div className="text-red-700 dark:text-red-300 space-y-1">
+              <p className="font-medium">原因：文件包含病毒或潜在的垃圾软件 (os error 225)</p>
+              <p className="text-xs">frpc 是 ChmlFrp 官方提供的内网穿透工具，被 Defender 误报为威胁并拦截。</p>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="font-medium">处理步骤：</p>
+            <ol className="list-decimal list-inside space-y-1 text-muted-foreground text-xs ml-1">
+              <li>点击下方按钮打开「病毒和威胁防护」设置</li>
+              <li>将「实时保护」开关关闭（临时关闭即可）</li>
+              <li>返回本软件重新发起测速</li>
+            </ol>
+          </div>
+
+          <div className="flex items-start gap-2 p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md">
+            <Info className="w-3.5 h-3.5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              实时保护关闭期间系统防护会降低。Windows 通常会在短时间内自动重新开启实时保护；若需立即恢复，可再次点击下方按钮手动开启。
+            </p>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setShowDefenderDialog(false)}>
+            稍后处理
+          </Button>
+          <Button
+            variant="outline"
+            onClick={async () => {
+              try {
+                // 调用后端命令打开 windowsdefender:// 协议（opener 插件默认不允许此协议）
+                await invoke("open_system_url", { url: "windowsdefender://threatsettings/" });
+              } catch (err) {
+                console.error("打开 Windows 安全中心失败:", err);
+              }
+            }}
+          >
+            <ExternalLink className="w-4 h-4 mr-1.5" />
+            打开病毒和威胁防护
+          </Button>
+          <Button
+            onClick={() => {
+              setShowDefenderDialog(false);
+              handleStartTest();
+            }}
+          >
+            <RotateCcw className="w-4 h-4 mr-1.5" />
+            已关闭，重新测速
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }

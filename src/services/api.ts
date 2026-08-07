@@ -1,19 +1,31 @@
-const API_BASE_URL = "https://cf-v2.uapis.cn";
-const ACCOUNT_OAUTH_ISSUER = "https://account-api.qzhua.net";
-const ACCOUNT_OAUTH_CLIENT_ID = "019d5ce39a9b728fa1b5565be72d84ca";
-const ACCOUNT_OAUTH_CLIENT_SECRET = "";
+import {
+  CHMLFRP_API_BASE_URL,
+  BACKEND_API_BASE_URL,
+} from "@/lib/api-endpoints";
+import { invoke } from "@tauri-apps/api/core";
+
+const API_BASE_URL = CHMLFRP_API_BASE_URL;
 
 export interface StoredUser {
   username: string;
   usergroup: string;
   userimg?: string | null;
   usertoken?: string;
+  /** qzhua 真实 access_token（30 分钟有效期，过期自动通过 proxyToken 刷新） */
   accessToken?: string;
-  refreshToken?: string;
+  /** access_token 过期时间戳（毫秒） */
   accessTokenExpiresAt?: number;
   tokenType?: string;
+  /** 后端代理令牌（7 天有效期，替代旧 refreshToken，由后端托管 qzhua refresh_token） */
+  proxyToken?: string;
+  /** 代理令牌过期时间（ISO 8601 字符串） */
+  proxyExpiresAt?: string | null;
   tunnelCount?: number;
   tunnel?: number;
+  /** 用户邮箱（来自 ChmlFrp 账号信息，用于工单联系方式预填） */
+  email?: string | null;
+  /** 用户手机号（暂无自动获取来源，由用户在工单中手填） */
+  phone?: string | null;
 }
 
 export interface UserInfo {
@@ -76,41 +88,15 @@ export interface SignInInfo {
   last_sign_in_time: string;
 }
 
-export interface DeviceAuthorizationResponse {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  verification_uri_complete?: string;
-  expires_in?: number;
-  interval?: number;
-}
-
-export interface DeviceTokenResponse {
-  access_token?: string;
-  token_type?: string;
-  expires_in?: number;
-  refresh_token?: string;
-  scope?: string;
-  error?: string;
-  error_description?: string;
-  error_uri?: string;
-}
-
 interface ApiResponse<T> {
   code: number;
   msg?: string;
   data?: T;
 }
 
-interface RawHttpResponse {
-  status: number;
-  body: string;
-}
-
 const isBrowser = typeof window !== "undefined";
 const NODE_UDP_CACHE_KEY = "node_udp_cache";
 const NODE_UDP_CACHE_TTL = 5 * 60 * 1000;
-const DEVICE_CODE_DEFAULT_SCOPE = "profile email offline_access chmlfrp_api";
 
 // 简单的请求去重（针对短时间内重复发起相同请求的场景）
 const pendingRequests = new Map<string, Promise<unknown>>();
@@ -140,36 +126,6 @@ function getRequestUrl(endpoint: string): string {
   return endpoint.startsWith("/")
     ? `${API_BASE_URL}${endpoint}`
     : `${API_BASE_URL}/${endpoint}`;
-}
-
-function getOAuthUrl(path: string): string {
-  return new URL(path, ACCOUNT_OAUTH_ISSUER).toString();
-}
-
-function getOAuthHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/x-www-form-urlencoded",
-    Accept: "application/json",
-  };
-
-  if (ACCOUNT_OAUTH_CLIENT_SECRET.trim()) {
-    headers.Authorization = `Basic ${btoa(
-      `${ACCOUNT_OAUTH_CLIENT_ID}:${ACCOUNT_OAUTH_CLIENT_SECRET}`,
-    )}`;
-  }
-
-  return headers;
-}
-
-function getOAuthErrorMessage(
-  response: DeviceTokenResponse | undefined,
-  fallback: string,
-): string {
-  if (!response) {
-    return fallback;
-  }
-
-  return response.error_description || response.error || fallback;
 }
 
 function normalizeStoredUser(user: StoredUser | null): StoredUser | null {
@@ -203,36 +159,143 @@ function getCurrentAccessToken(user: StoredUser | null): string | undefined {
   return undefined;
 }
 
+// access_token 有效期通常 30 分钟，提前 60 秒刷新确保有足够窗口
+const TOKEN_REFRESH_LEAD_MS = 60_000;
+
+// 后端未返回 expiresIn 时，保守默认 access_token 25 分钟过期
+const DEFAULT_ACCESS_TOKEN_TTL_MS = 25 * 60 * 1000;
+
 function isAccessTokenExpiring(user: StoredUser | null): boolean {
   const expiresAt = user?.accessTokenExpiresAt;
   if (!expiresAt) {
     return false;
   }
-  return Date.now() >= expiresAt - 60_000;
+  return Date.now() >= expiresAt - TOKEN_REFRESH_LEAD_MS;
+}
+
+/** 检查代理令牌是否已过期（7 天有效期） */
+function isProxyTokenExpired(user: StoredUser | null): boolean {
+  if (!user?.proxyExpiresAt) {
+    return false;
+  }
+  const expiresAt = new Date(user.proxyExpiresAt).getTime();
+  if (!Number.isFinite(expiresAt)) {
+    return false;
+  }
+  return Date.now() >= expiresAt;
 }
 
 function toBearerHeader(token: string): string {
   return token.startsWith("Bearer ") ? token : `Bearer ${token}`;
 }
 
-async function refreshAccessToken(refreshToken: string): Promise<DeviceTokenResponse> {
-  const body = new URLSearchParams();
-  body.set("grant_type", "refresh_token");
-  body.set("refresh_token", refreshToken);
+// ===== 代理令牌刷新（调后端 /auth/refresh，后端内部托管 qzhua refresh_token） =====
 
-  if (!ACCOUNT_OAUTH_CLIENT_SECRET.trim()) {
-    body.set("client_id", ACCOUNT_OAUTH_CLIENT_ID);
+/** 后端 /auth/refresh 成功响应 */
+interface ProxyRefreshResponse {
+  success: boolean;
+  accessToken: string;
+  expiresIn: number;
+  tokenType: string;
+  proxyExpiresIn: number;
+}
+
+/** 后端 /auth/refresh 失败响应 */
+interface ProxyRefreshError {
+  code: string;
+  message?: string;
+}
+
+/** 代理令牌刷新错误（携带错误码，便于调用方区分「需重新登录」vs「临时故障」） */
+export class ProxyTokenError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "ProxyTokenError";
+    this.code = code;
+  }
+}
+
+// 单例锁：并发调用复用同一刷新 Promise，避免重复请求触发后端速率限制（每分钟 5 次）
+let refreshingPromise: Promise<ProxyRefreshResponse> | null = null;
+
+/**
+ * 用代理令牌换 access_token
+ *
+ * 后端有缓存优化：若当前 access_token 还剩超过 60 秒有效期，直接返回缓存值，
+ * 不会真的调 qzhua。所以可以放心频繁调用。
+ *
+ * 失败处理：
+ * - PROXY_TOKEN_INVALID / REFRESH_TOKEN_EXPIRED：需清空登录态，跳转登录页
+ * - RATE_LIMITED：退避后重试
+ * - REFRESH_FAILED：后端临时故障，保留登录态退避重试
+ */
+async function refreshAccessTokenViaProxy(proxyToken: string): Promise<ProxyRefreshResponse> {
+  if (refreshingPromise) {
+    return refreshingPromise;
   }
 
-  const response = await oauthRequest({
-    path: "/oauth2/token",
-    body,
-  });
+  refreshingPromise = (async () => {
+    const response = await fetch(`${BACKEND_API_BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${proxyToken}`,
+      },
+      cache: "no-store",
+      credentials: "omit",
+    });
 
-  return parseOAuthJson<DeviceTokenResponse>(
-    response,
-    "账户服务返回了无法解析的刷新响应",
-  );
+    if (!response.ok) {
+      let errBody: ProxyRefreshError = { code: "UNKNOWN" };
+      try {
+        errBody = await response.json();
+      } catch {
+        // 响应非 JSON，使用默认错误
+      }
+      const code = errBody.code || "UNKNOWN";
+      const msg = errBody.message || `代理令牌刷新失败 (HTTP ${response.status})`;
+      console.error(`[auth] /auth/refresh 失败 HTTP ${response.status}:`, errBody);
+      throw new ProxyTokenError(code, msg);
+    }
+
+    const data = await response.json() as ProxyRefreshResponse;
+    if (!data.success || !data.accessToken) {
+      throw new ProxyTokenError("UNKNOWN", "代理令牌刷新返回异常");
+    }
+
+    console.log("[auth] /auth/refresh 成功，新 access_token 前 8 位:",
+      data.accessToken.slice(0, 8), "expiresIn:", data.expiresIn,
+      "proxyExpiresIn:", data.proxyExpiresIn);
+
+    // 同步更新内存缓存中的 accessToken，异步持久化到加密数据库
+    if (cachedUser) {
+      const updatedUser: StoredUser = {
+        ...cachedUser,
+        accessToken: data.accessToken,
+        accessTokenExpiresAt: data.expiresIn
+          ? Date.now() + data.expiresIn * 1000
+          : Date.now() + DEFAULT_ACCESS_TOKEN_TTL_MS,
+        tokenType: data.tokenType || cachedUser.tokenType || "Bearer",
+      };
+      cachedUser = updatedUser;
+      invoke("secure_store", {
+        key: SECURE_USER_KEY,
+        value: JSON.stringify(updatedUser),
+      }).catch((err) => {
+        console.error("[secureStorage] 保存刷新后的用户数据失败:", err);
+        localStorage.setItem("chmlfrp_user", JSON.stringify(updatedUser));
+      });
+    }
+
+    return data;
+  })();
+
+  try {
+    return await refreshingPromise;
+  } finally {
+    refreshingPromise = null;
+  }
 }
 
 async function ensureAuthenticatedUser(
@@ -254,31 +317,42 @@ async function ensureAuthenticatedUser(
     throw new Error("登录信息已过期，请重新登录");
   }
 
+  // 代理令牌已过期（7 天到期），必须重新登录
+  if (isProxyTokenExpired(storedUser)) {
+    clearStoredUser();
+    throw new ProxyTokenError("PROXY_TOKEN_INVALID", "代理令牌已过期，请重新登录");
+  }
+
   const currentAccessToken = getCurrentAccessToken(storedUser);
   if (currentAccessToken) {
-    if (storedUser.refreshToken && isAccessTokenExpiring(storedUser)) {
-      const refreshed = await refreshAccessToken(storedUser.refreshToken);
-      if (!refreshed.access_token) {
-        clearStoredUser();
-        throw new Error(
-          getOAuthErrorMessage(refreshed, "登录信息已过期，请重新登录"),
-        );
+    // access_token 即将过期且有 proxyToken，主动刷新
+    if (storedUser.proxyToken && isAccessTokenExpiring(storedUser)) {
+      try {
+        await refreshAccessTokenViaProxy(storedUser.proxyToken);
+        const updatedUser = getStoredUser();
+        if (updatedUser?.accessToken) {
+          return {
+            storedUser: updatedUser,
+            accessToken: updatedUser.accessToken,
+            legacyToken: getLegacyApiToken(updatedUser),
+          };
+        }
+      } catch (refreshErr) {
+        if (refreshErr instanceof ProxyTokenError) {
+          // PROXY_TOKEN_INVALID / REFRESH_TOKEN_EXPIRED：必须重新登录
+          if (
+            refreshErr.code === "PROXY_TOKEN_INVALID" ||
+            refreshErr.code === "REFRESH_TOKEN_EXPIRED"
+          ) {
+            clearStoredUser();
+            throw refreshErr;
+          }
+          // RATE_LIMITED / REFRESH_FAILED / UNKNOWN：降级用旧 token 尝试
+          console.warn(`[auth] /auth/refresh 暂时失败 (${refreshErr.code})，降级使用旧 access_token`);
+        } else {
+          console.warn("[auth] /auth/refresh 网络异常，降级使用旧 access_token:", refreshErr);
+        }
       }
-      const updatedUser: StoredUser = {
-        ...storedUser,
-        accessToken: refreshed.access_token,
-        refreshToken: refreshed.refresh_token || storedUser.refreshToken,
-        accessTokenExpiresAt: refreshed.expires_in
-          ? Date.now() + refreshed.expires_in * 1000
-          : storedUser.accessTokenExpiresAt,
-        tokenType: refreshed.token_type || storedUser.tokenType || "Bearer",
-      };
-      saveStoredUser(updatedUser);
-      return {
-        storedUser: updatedUser,
-        accessToken: updatedUser.accessToken,
-        legacyToken: getLegacyApiToken(updatedUser),
-      };
     }
 
     return {
@@ -286,6 +360,32 @@ async function ensureAuthenticatedUser(
       accessToken: currentAccessToken,
       legacyToken: getLegacyApiToken(storedUser),
     };
+  }
+
+  // 无 accessToken 但有 proxyToken，立即刷新
+  if (storedUser.proxyToken) {
+    try {
+      await refreshAccessTokenViaProxy(storedUser.proxyToken);
+      const updatedUser = getStoredUser();
+      if (updatedUser?.accessToken) {
+        return {
+          storedUser: updatedUser,
+          accessToken: updatedUser.accessToken,
+          legacyToken: getLegacyApiToken(updatedUser),
+        };
+      }
+    } catch (refreshErr) {
+      if (refreshErr instanceof ProxyTokenError) {
+        if (
+          refreshErr.code === "PROXY_TOKEN_INVALID" ||
+          refreshErr.code === "REFRESH_TOKEN_EXPIRED"
+        ) {
+          clearStoredUser();
+          throw refreshErr;
+        }
+      }
+      throw refreshErr;
+    }
   }
 
   const legacyToken = getLegacyApiToken(storedUser);
@@ -298,45 +398,6 @@ async function ensureAuthenticatedUser(
 
   clearStoredUser();
   throw new Error("登录信息已过期，请重新登录");
-}
-
-async function oauthRequest(options: {
-  path: string;
-  body: URLSearchParams;
-}): Promise<RawHttpResponse> {
-  const response = await fetch(getOAuthUrl(options.path), {
-    method: "POST",
-    headers: getOAuthHeaders(),
-    body: options.body.toString(),
-    cache: "no-store",
-    credentials: "omit",
-  });
-
-  return {
-    status: response.status,
-    body: await response.text(),
-  };
-}
-
-function parseOAuthJson<T>(response: RawHttpResponse, fallback: string): T {
-  try {
-    return JSON.parse(response.body) as T;
-  } catch {
-    const content = response.body.trim().toLowerCase();
-    if (content.startsWith("<!doctype html") || content.startsWith("<html")) {
-      throw new Error(
-        "账户中心返回了登录页而不是 OAuth 响应，请确认当前请求必须使用浏览器环境发起，且 client_id 已开启设备码授权。",
-      );
-    }
-
-    if (response.status === 401) {
-      throw new Error(
-        "账户中心拒绝了当前客户端，请检查 client_id 或 client_secret 是否正确。",
-      );
-    }
-
-    throw new Error(fallback);
-  }
 }
 
 async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
@@ -409,132 +470,191 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   return promise;
 }
 
+// ===== 安全存储（加密数据库替代 localStorage） =====
+
+/** 内存缓存，供同步读取 */
+let cachedUser: StoredUser | null = null;
+
+/** 安全存储 key */
+const SECURE_USER_KEY = "chmlfrp_user";
+
+/** 初始化安全存储：从加密数据库加载用户数据到内存缓存
+ *  应用启动时调用一次。包含从旧 localStorage 自动迁移逻辑。
+ *  返回 true 表示有已登录用户。
+ */
+let initPromise: Promise<boolean> | null = null;
+
+export function initSecureStorage(): Promise<boolean> {
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    if (!isBrowser) return false;
+    try {
+      // 1. 从加密数据库加载
+      const encrypted = await invoke<string>("secure_load", {
+        key: SECURE_USER_KEY,
+      });
+      if (encrypted) {
+        const user = normalizeStoredUser(JSON.parse(encrypted) as StoredUser);
+        // 检查代理令牌是否已过期（7 天到期则需重新登录）
+        if (user && isProxyTokenExpired(user)) {
+          console.log("[secureStorage] 代理令牌已过期，清除登录态");
+          cachedUser = null;
+          await invoke("secure_delete", { key: SECURE_USER_KEY }).catch(() => {});
+          return false;
+        }
+        // 旧版本数据（有 refreshToken 但无 proxyToken）无法续期，清除
+        if (user && !user.proxyToken) {
+          console.log("[secureStorage] 旧版本登录态无 proxyToken，清除");
+          cachedUser = null;
+          await invoke("secure_delete", { key: SECURE_USER_KEY }).catch(() => {});
+          return false;
+        }
+        cachedUser = user;
+        return true;
+      }
+      // 2. 数据库为空时检查 localStorage（极旧版本数据迁移）
+      const legacy = localStorage.getItem("chmlfrp_user");
+      if (legacy) {
+        const user = normalizeStoredUser(JSON.parse(legacy) as StoredUser);
+        // 旧版本数据无 proxyToken，直接清除并提示重新登录
+        if (!user?.proxyToken) {
+          console.log("[secureStorage] localStorage 旧版本数据无 proxyToken，清除");
+          localStorage.removeItem("chmlfrp_user");
+          return false;
+        }
+        cachedUser = user;
+        await invoke("secure_store", {
+          key: SECURE_USER_KEY,
+          value: JSON.stringify(user),
+        });
+        localStorage.removeItem("chmlfrp_user");
+        return true;
+      }
+    } catch (err) {
+      console.warn("[secureStorage] 初始化失败，降级到 localStorage:", err);
+      const legacy = localStorage.getItem("chmlfrp_user");
+      if (legacy) {
+        const user = normalizeStoredUser(JSON.parse(legacy) as StoredUser);
+        if (user?.proxyToken && !isProxyTokenExpired(user)) {
+          cachedUser = user;
+          return true;
+        }
+      }
+    }
+    return false;
+  })();
+  return initPromise;
+}
+
 export const getStoredUser = (): StoredUser | null => {
   if (!isBrowser) return null;
-  const saved = localStorage.getItem("chmlfrp_user");
-  if (!saved) return null;
-  try {
-    return normalizeStoredUser(JSON.parse(saved) as StoredUser);
-  } catch {
-    return null;
-  }
+  return cachedUser;
 };
 
 export const saveStoredUser = (user: StoredUser) => {
   if (!isBrowser) return;
-  localStorage.setItem(
-    "chmlfrp_user",
-    JSON.stringify(normalizeStoredUser(user)),
-  );
+  const normalized = normalizeStoredUser(user);
+  cachedUser = normalized;
+  // 异步写入加密数据库（不阻塞 UI）
+  invoke("secure_store", {
+    key: SECURE_USER_KEY,
+    value: JSON.stringify(normalized),
+  }).catch((err) => {
+    console.error("[secureStorage] 保存用户数据失败:", err);
+    // 降级：写入 localStorage
+    localStorage.setItem("chmlfrp_user", JSON.stringify(normalized));
+  });
 };
 
 export const clearStoredUser = () => {
   if (!isBrowser) return;
+  cachedUser = null;
+  // 异步从加密数据库删除
+  invoke("secure_delete", { key: SECURE_USER_KEY }).catch((err) => {
+    console.error("[secureStorage] 删除用户数据失败:", err);
+  });
+  // 同时清除 localStorage（兼容降级场景）
   localStorage.removeItem("chmlfrp_user");
 };
 
-export async function login(
-  username: string,
-  password: string,
+/**
+ * 用代理令牌完成登录
+ *
+ * 后端 /auth/status 返回 proxyToken 后，软件端调用此方法：
+ * 1. 用 proxyToken 调后端 /auth/refresh 获取首个 accessToken
+ * 2. 调 ChmlFrp /userinfo 获取用户信息
+ * 3. 组装 StoredUser 并返回
+ *
+ * @param proxyToken 后端下发的代理令牌（64 位 hex，7 天有效）
+ * @param user 后端 /auth/status 返回的 user 对象
+ * @param proxyExpiresAt 代理令牌过期时间（ISO 8601）
+ */
+export async function loginWithProxyToken(
+  proxyToken: string,
+  user: {
+    username: string;
+    usergroup: string;
+    userimg?: string | null;
+    usertoken?: string;
+    email?: string | null;
+    phone?: string | null;
+  },
+  proxyExpiresAt?: string | null,
 ): Promise<StoredUser> {
-  const data = await request<StoredUser>("/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
-  });
+  console.log("[auth] 代理令牌登录，proxyToken 前 8 位:", proxyToken.slice(0, 8));
 
-  return {
-    username: data?.username ?? username,
-    usergroup: data?.usergroup ?? "",
-    userimg: data?.userimg ?? "",
-    usertoken: data?.usertoken ?? "",
-    tunnelCount: data?.tunnelCount ?? 0,
-    tunnel: data?.tunnel ?? 0,
+  // 1. 用 proxyToken 换 accessToken
+  const refreshResult = await refreshAccessTokenViaProxy(proxyToken);
+
+  // 2. 组装用户信息（后端 /auth/status 已返回 user，无需再调 /userinfo）
+  //    但 user.usertoken 可能与 accessToken 不同，保留后端返回的 usertoken
+  const storedUser: StoredUser = {
+    username: user.username,
+    usergroup: user.usergroup,
+    userimg: user.userimg,
+    usertoken: user.usertoken,
+    accessToken: refreshResult.accessToken,
+    accessTokenExpiresAt: refreshResult.expiresIn
+      ? Date.now() + refreshResult.expiresIn * 1000
+      : Date.now() + DEFAULT_ACCESS_TOKEN_TTL_MS,
+    tokenType: refreshResult.tokenType || "Bearer",
+    proxyToken,
+    proxyExpiresAt: proxyExpiresAt ?? null,
+    email: user.email ?? null,
+    phone: user.phone ?? null,
   };
+
+  console.log("[auth] 代理令牌登录成功，username:", storedUser.username,
+    "accessToken 前 8 位:", storedUser.accessToken?.slice(0, 8));
+
+  return storedUser;
 }
 
-export async function createDeviceAuthorization(
-  scope = DEVICE_CODE_DEFAULT_SCOPE,
-): Promise<DeviceAuthorizationResponse> {
-  const body = new URLSearchParams();
-  body.set("client_id", ACCOUNT_OAUTH_CLIENT_ID);
-
-  const normalizedScope = scope
-    .split(/[,\s]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .join(" ");
-
-  if (normalizedScope) {
-    body.set("scope", normalizedScope);
+/**
+ * 退出登录：吊销代理令牌并清除本地登录态
+ *
+ * 调用后端 /auth/revoke 使 proxyToken 立即失效，然后清除本地存储。
+ * 即使后端吊销失败（网络错误等），也会清除本地登录态，确保用户能退出。
+ */
+export async function logoutWithProxyToken(): Promise<void> {
+  const user = getStoredUser();
+  if (user?.proxyToken) {
+    try {
+      await fetch(`${BACKEND_API_BASE_URL}/auth/revoke`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${user.proxyToken}`,
+        },
+        cache: "no-store",
+        credentials: "omit",
+      });
+      console.log("[auth] 代理令牌已吊销");
+    } catch (err) {
+      console.warn("[auth] 吊销代理令牌失败（仍会清除本地登录态）:", err);
+    }
   }
-
-  const response = await oauthRequest({
-    path: "/oauth2/device_authorization",
-    body,
-  });
-
-  const data = parseOAuthJson<
-    DeviceAuthorizationResponse | DeviceTokenResponse
-  >(response, "账户服务返回了无法解析的响应");
-
-  if (
-    response.status >= 200 &&
-    response.status < 300 &&
-    data &&
-    "device_code" in data
-  ) {
-    return data;
-  }
-
-  throw new Error(getOAuthErrorMessage(data ?? undefined, "申请设备授权失败"));
-}
-
-export async function exchangeDeviceCodeForToken(
-  deviceCode: string,
-): Promise<DeviceTokenResponse> {
-  const body = new URLSearchParams();
-  body.set("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
-  body.set("device_code", deviceCode);
-
-  if (!ACCOUNT_OAUTH_CLIENT_SECRET.trim()) {
-    body.set("client_id", ACCOUNT_OAUTH_CLIENT_ID);
-  }
-
-  const response = await oauthRequest({
-    path: "/oauth2/token",
-    body,
-  });
-
-  return parseOAuthJson<DeviceTokenResponse>(
-    response,
-    "账户服务返回了无法解析的令牌响应",
-  );
-}
-
-export async function loginWithAccessToken(
-  accessToken: string,
-  tokenResponse?: Pick<
-    DeviceTokenResponse,
-    "refresh_token" | "expires_in" | "token_type"
-  >,
-): Promise<StoredUser> {
-  const userInfo = await fetchUserInfo(accessToken);
-
-  return {
-    username: userInfo.username,
-    usergroup: userInfo.usergroup,
-    userimg: userInfo.userimg,
-    usertoken: userInfo.usertoken,
-    accessToken,
-    refreshToken: tokenResponse?.refresh_token,
-    accessTokenExpiresAt: tokenResponse?.expires_in
-      ? Date.now() + tokenResponse.expires_in * 1000
-      : undefined,
-    tokenType: tokenResponse?.token_type || "Bearer",
-    tunnelCount: userInfo.tunnelCount,
-    tunnel: userInfo.tunnel,
-  };
+  clearStoredUser();
 }
 
 export async function fetchTunnels(token?: string): Promise<Tunnel[]> {

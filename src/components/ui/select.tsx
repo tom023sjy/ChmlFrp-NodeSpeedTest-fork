@@ -159,7 +159,7 @@ export function Select({
               maxHeight: menuStyle.maxHeight,
               overflowY: "auto",
             }}
-            className="fixed z-[60] bg-card border border-border/60 rounded-lg shadow-lg pointer-events-auto visible-scrollbar"
+            className="fixed z-[20000] bg-card border border-border/60 rounded-lg shadow-lg pointer-events-auto visible-scrollbar"
             onWheel={(e) => {
               // 阻止滚轮事件冒泡到外层 overflow-y-auto 容器，确保菜单自身可滚动
               e.stopPropagation();

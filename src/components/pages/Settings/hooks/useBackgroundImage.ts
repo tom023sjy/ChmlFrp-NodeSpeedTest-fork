@@ -7,6 +7,8 @@ import {
   getInitialBackgroundBlur,
   isVideoFile,
 } from "../utils";
+import { getStoredUser } from "@/services/api";
+import { reportUsage } from "@/services/backendApi";
 
 export function useBackgroundImage() {
   const [backgroundImage, setBackgroundImage] = useState<string | null>(() =>
@@ -81,6 +83,10 @@ export function useBackgroundImage() {
             toast.success("背景视频设置成功", {
               duration: 2000,
             });
+            // 背景更换成功埋点：仅在用户已登录时上报，失败静默不影响主流程
+            if (getStoredUser()?.accessToken) {
+              reportUsage({ eventType: "background_change" }).catch(() => {});
+            }
           } catch (error) {
             const errorMsg =
               error instanceof Error ? error.message : String(error);
@@ -99,6 +105,10 @@ export function useBackgroundImage() {
             toast.success("背景图设置成功", {
               duration: 2000,
             });
+            // 背景更换成功埋点：仅在用户已登录时上报，失败静默不影响主流程
+            if (getStoredUser()?.accessToken) {
+              reportUsage({ eventType: "background_change" }).catch(() => {});
+            }
           } catch (error) {
             const errorMsg =
               error instanceof Error ? error.message : String(error);

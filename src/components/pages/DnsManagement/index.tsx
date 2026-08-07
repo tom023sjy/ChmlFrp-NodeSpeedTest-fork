@@ -44,6 +44,7 @@ import {
   type TimeInterval,
 } from "@/services/ddnsService";
 import { dnsFailoverService, type DnsProviderKind } from "@/services/dnsFailoverService";
+import { reportUsage } from "@/services/backendApi";
 
 interface DnsManagementProps {
   user?: StoredUser | null;
@@ -478,6 +479,10 @@ function TaskEditDialog({
       const payload = { ...form, id: form.id || `t_${Date.now().toString(36)}` };
       await ddnsService.saveTask(user.username, payload);
       toast.success("已保存");
+      // DDNS 任务更新/创建埋点：仅在用户已登录时上报，失败静默不影响主流程
+      if (user?.accessToken) {
+        reportUsage({ eventType: "ddns_update" }).catch(() => {});
+      }
       onSaved();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "保存失败");

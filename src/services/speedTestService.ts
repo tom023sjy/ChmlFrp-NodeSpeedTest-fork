@@ -2,12 +2,47 @@ import { invoke } from "@tauri-apps/api/core";
 import { tunnelService, type TempTunnelInfo } from "./tunnelService";
 import { frpcService } from "./frpcService";
 import { getStoredUser, fetchNodeInfo } from "./api";
+import { reportUsage } from "./backendApi";
+
+/** 测速错误类型，用于触发不同 UI 反馈 */
+export type SpeedTestErrorType =
+  | "defender_blocked" // Windows Defender 实时保护拦截 frpc
+  | "generic";
 
 export interface SpeedTestResult {
   success: boolean;
   latency?: number;
   downloadSpeed?: number;
   error?: string;
+  /** 错误分类，前端据此决定是否弹出特殊提示 */
+  errorType?: SpeedTestErrorType;
+}
+
+/**
+ * 识别 Windows Defender 实时保护拦截 frpc 启动的错误
+ *
+ * 触发特征：
+ * - 错误码 225（0xE1）= ERROR_VIRUS_INFECTED
+ * - 中文："文件包含病毒或潜在的垃圾软件"
+ * - 英文："file contains a virus or potentially unwanted software"
+ * - 0x800700E1（HRESULT 包装）
+ *
+ * 仅在 Windows 平台生效，Linux/macOS 不会触发此错误。
+ */
+export function isDefenderBlockedError(message: string): boolean {
+  if (typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("WIN") < 0) {
+    return false;
+  }
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("os error 225") ||
+    lower.includes("0x800700e1") ||
+    lower.includes("0xe1") && lower.includes("virus") ||
+    lower.includes("病毒") ||
+    lower.includes("垃圾软件") ||
+    lower.includes("file contains a virus") ||
+    lower.includes("potentially unwanted software")
+  );
 }
 
 export interface LogEntry {
@@ -177,6 +212,10 @@ export class SpeedTestService {
       frpcStarted = true;
       this.currentFrpcStarted = true;
       this.addLog("frpc 客户端已启动", "success");
+      // frpc 配置生成成功埋点：仅在用户已登录时上报，失败静默不影响主流程
+      if (user?.accessToken) {
+        reportUsage({ eventType: "frpc_config" }).catch(() => {});
+      }
 
       if (this.abortController?.signal.aborted) {
         throw new Error("测试已取消");
@@ -257,18 +296,24 @@ export class SpeedTestService {
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const isDefender = isDefenderBlockedError(errorMessage);
       this.addLog(`错误: ${errorMessage}`, "error");
-      
+
+      if (isDefender) {
+        this.addLog("检测到 Windows Defender 实时保护拦截了 frpc，已停止测速", "warning");
+      }
+
       this.updateProgress(onProgress, "cleaning_up", "正在清理资源...");
       this.addLog("正在清理资源...", "info");
       await this.cleanup(frpcStarted, tunnelInfo, tcpServerPort);
       this.addLog("资源清理完成", "success");
-      
+
       this.updateProgress(onProgress, "error", errorMessage);
 
       return {
         success: false,
         error: errorMessage,
+        errorType: isDefender ? "defender_blocked" : "generic",
       };
     }
   }

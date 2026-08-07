@@ -3,12 +3,18 @@ import { Sidebar } from "@/components/Sidebar";
 import { TitleBar, WindowControls } from "@/components/TitleBar";
 import { NodeTest } from "@/components/pages/NodeTest";
 import { Settings } from "@/components/pages/Settings";
+import { About } from "@/components/pages/About";
 import { DnsFailover } from "@/components/pages/DnsFailover";
 import { DnsManagement } from "@/components/pages/DnsManagement";
 import { SslManagement } from "@/components/pages/SslManagement";
 import { SslProgressProvider } from "@/components/pages/SslManagement/SslProgressContext";
 import { DnsCredentials } from "@/components/pages/DnsCredentials";
-import { getStoredUser, clearStoredUser, fetchUserInfo, type StoredUser } from "@/services/api";
+import { DeviceManagement } from "@/components/pages/DeviceManagement";
+import { getStoredUser, clearStoredUser, fetchUserInfo, initSecureStorage, ProxyTokenError, type StoredUser } from "@/services/api";
+import { reportUsage } from "@/services/backendApi";
+import { getRelayClient } from "@/services/deviceRelay";
+import { registerRelayHandlers } from "@/services/relayHandlers";
+import { getDeviceId } from "@/services/deviceId";
 import { useAppTheme } from "@/components/App/hooks/useAppTheme";
 import { useTitleBar } from "@/components/App/hooks/useTitleBar";
 import { useBackground } from "@/components/App/hooks/useBackground";
@@ -24,7 +30,16 @@ import { toast } from "sonner";
 
 function App() {
   const [activeTab, setActiveTab] = useState("node-test");
-  const [user, setUser] = useState<StoredUser | null>(() => getStoredUser());
+  const [user, setUser] = useState<StoredUser | null>(null);
+
+  // 启动时从加密数据库加载登录状态
+  useEffect(() => {
+    initSecureStorage().then((hasUser) => {
+      if (hasUser) {
+        setUser(getStoredUser());
+      }
+    });
+  }, []);
   const initialSidebarMode = getInitialSidebarMode();
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
     initialSidebarMode !== "classic",
@@ -59,6 +74,8 @@ function App() {
   const SIDEBAR_LEFT = isMacOS && !showTitleBar ? 10 : 15;
   const SIDEBAR_COLLAPSED_WIDTH = Math.round(((20 * 5) / 3) * 2);
   const appContainerRef = useRef<HTMLDivElement>(null);
+  // 应用启动埋点标记：仅在上报一次 app_launch 后置位，避免重复上报
+  const appLaunchReportedRef = useRef(false);
   const {
     backgroundImage,
     imageSrc,
@@ -169,6 +186,8 @@ function App() {
         return <DnsCredentials user={user} />;
       case "ssl-certs":
         return <SslManagement user={user} />;
+      case "device-management":
+        return <DeviceManagement user={user} />;
       case "settings":
         return (
           <Settings
@@ -180,6 +199,8 @@ function App() {
             onInstall={handleInstall}
           />
         );
+      case "about":
+        return <About />;
       default:
         return <NodeTest user={user} onTestingChange={handleTestingChange} />;
     }
@@ -237,25 +258,79 @@ function App() {
     }
   }, [user]);
 
+  // 设备互联：注册本机 RPC 命令处理器（仅需执行一次）
+  // 使本机作为被管理端时能响应远程命令
+  useEffect(() => {
+    const relay = getRelayClient();
+    const unregister = registerRelayHandlers(relay);
+    return unregister;
+  }, []);
+
+  // 设备互联：登录后建立 WebSocket 中继连接，登出时断开
+  // 互联开关变化时也会触发重新连接（通过 interconnectVersion 递增）
+  const [interconnectVersion, setInterconnectVersion] = useState(0);
+  useEffect(() => {
+    const handler = () => setInterconnectVersion((v) => v + 1);
+    window.addEventListener("interconnectChanged", handler);
+    return () => window.removeEventListener("interconnectChanged", handler);
+  }, []);
+
+  useEffect(() => {
+    const relay = getRelayClient();
+    if (!user?.proxyToken) {
+      relay.disconnect();
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const deviceId = await getDeviceId();
+        const sysInfo = await invoke<{ osInfo: string; hostname: string }>("get_system_info");
+        const interconnect = localStorage.getItem("interconnect_enabled") === "true";
+        if (cancelled) return;
+        await relay.connect(user.proxyToken!, deviceId, {
+          deviceType: "desktop",
+          osInfo: sysInfo.osInfo,
+          hostname: sysInfo.hostname,
+          interconnect,
+        });
+      } catch (err) {
+        console.warn("[relay] 连接失败:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      relay.disconnect();
+    };
+  }, [user, interconnectVersion]);
+
   // 定期检查登录状态，避免 token 过期或服务端踢下线后用户无感知
-  // 每 1 分钟调用一次 /userinfo 接口验证；失败时清除登录并提示
+  // 每 2 分钟调用一次 /userinfo 接口验证；fetchUserInfo 内部会自动触发
+  // access_token 刷新（提前 60 秒）和 proxyToken 过期检测
   // 同时把最新 accessToken 推送给后端（DNS 容灾调度器使用）
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
-    const CHECK_INTERVAL_MS = 60 * 1000;
+    const CHECK_INTERVAL_MS = 2 * 60 * 1000;
 
     const checkLogin = async () => {
       try {
         await fetchUserInfo();
         // 静默成功：token 仍有效，不提示避免打扰
-        // 推送最新 token 给后端（fetchUserInfo 内部可能已刷新 token 并写入 localStorage）
+        // 推送最新 token 给后端（fetchUserInfo 内部可能已刷新 token 并写入数据库）
         const latest = getStoredUser();
         if (latest?.accessToken) {
           invoke("set_user_token", { token: latest.accessToken }).catch(() => {});
         }
       } catch (err) {
         if (cancelled) return;
+        // ProxyTokenError 表示代理令牌或 qzhua refresh_token 失效，必须重新登录
+        if (err instanceof ProxyTokenError) {
+          clearStoredUser();
+          setUser(null);
+          toast.error("登录状态已失效，请重新登录");
+          return;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         // 仅在明确是认证类错误时清除登录，避免网络抖动误清除
         if (/登录|过期|token|认证|unauthorized|401/i.test(msg)) {
@@ -273,6 +348,14 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
+  }, [user]);
+
+  // 应用启动埋点：用户已登录时上报一次 app_launch，失败静默不影响主流程
+  useEffect(() => {
+    if (appLaunchReportedRef.current) return;
+    if (!user?.accessToken) return;
+    appLaunchReportedRef.current = true;
+    reportUsage({ eventType: "app_launch" }).catch(() => {});
   }, [user]);
 
   return (

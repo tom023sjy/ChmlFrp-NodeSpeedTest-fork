@@ -2,7 +2,6 @@
 
 <div align="center">
 
-
 **快速测试节点延迟，帮助用户选择最优节点**
 
 [![GitHub release](https://img.shields.io/github/v/release/zhengddzz/ChmlFrp-Community-Toolbox?include_prereleases)](https://github.com/zhengddzz/ChmlFrp-Community-Toolbox/releases)
@@ -15,43 +14,68 @@
 
 ---
 
-## ✨ 核心功能
+## 核心功能
 
-### 🔍 节点自动探测
-支持调用 API 扫描 ChmlFrp 可用节点列表，快速获取节点的基础信息（如节点地区、运营商、在线状态），无需手动查询。
+### 节点测试
 
-### 🎯 多维度筛选
-提供 VIP 节点、国内国外、UDP 支持等筛选条件，用户可根据自身网络环境和需求，精准定位符合要求的节点，提高效率。
+- **节点自动探测** - 调用 API 扫描 ChmlFrp 可用节点列表，获取节点地区、运营商、在线状态等信息
+- **多维度筛选** - 支持 VIP 节点、国内国外、UDP 支持等筛选条件，精准定位符合要求的节点
+- **节点测速评估** - 内置本地测速功能，对筛选后的节点进行延迟和丢包率检测，直观展示连接质量
+- **推荐值算法** - 综合速度得分（权重 60%）与延迟得分（权重 40%），自动计算推荐值并分级展示
 
-### ⚡ 节点测速评估
-内置本地简单测速功能，对筛选后的节点进行延迟和丢包率检测，直观展示本地到节点的连接质量，辅助选择最优节点。
+### DNS 容灾
 
-### 📌 其他特性
-- **窗口置顶** - 方便随时查看测试进度
-- **结果持久化** - 测试结果自动保存
-- **自动更新** - 支持 GitHub 自动检查更新
+- **多平台支持** - 兼容 DNSPod.cn、DNSPod.com、阿里云、Cloudflare 域名 API
+- **隧道状态监控** - 基于隧道状态与节点状态自动切换 DNS 记录
+- **CNAME 自动填充** - 选中隧道后自动填充目标为隧道节点域名
+- **可配置策略** - 自定义轮询间隔、失败切换阈值、恢复回切阈值
 
-## 📥 下载安装
+### 域名解析（DDNS）
+
+- **多凭证来源** - 支持 ChmlFrp 免费域名或 DNS 凭证
+- **自动监控** - 监控本机网卡 IP 变化并自动更新解析
+- **灵活调度** - 支持固定时间点触发和分时段不同频率两种模式
+- **记录类型** - A / AAAA / CNAME（CNAME 支持从隧道选择）
+
+### SSL 证书管理
+
+- **一键申请** - 自动完成申请、添加 TXT、等待 DNS、触发验证、轮询状态全流程
+- **实时进度** - 浮动卡片展示申请阶段与日志流
+- **后台异步** - 不阻塞 UI，支持多任务并行
+
+### 设备互联
+
+- **同账号自动发现** - 无需绑定码，同账号设备自动互相发现
+- **端到端延迟测试** - ICMP Ping + TCP Ping
+- **端到端带宽测试** - HTTP 下载/上传测速，实时进度推送
+- **Daemon 服务器支持** - 部署 [Daemon](https://github.com/zhengddzz/chmlfrp-toolbox-daemon) 后可远程管理 Linux 服务器
+
+### 其他特性
+
+- 窗口置顶，方便随时查看测试进度
+- 测试结果持久化保存
+- 自动检查更新（GitHub Releases）
+- 数据加密存储（Windows DPAPI / Linux AES-256-GCM）
+
+## 下载安装
 
 ### Windows
-- 下载 `.msi` 或 `.exe` 安装包
-- 双击安装即可
+- 下载 `.msi` 或 `.exe` 安装包，双击安装
 
 ### macOS
-- 下载 `.dmg` 文件
-- 拖拽到应用程序文件夹
+- 下载 `.dmg` 文件，拖拽到应用程序文件夹
 
 ### Linux
-- 下载 `.deb` 或 `.AppImage`
-- 根据发行版安装
+- 下载 `.deb` 或 `.AppImage`，根据发行版安装
+- 支持 x64 和 ARM64 架构
 
-## 🛠️ 技术栈
+## 技术栈
 
-- **前端**: React + TypeScript + Tailwind CSS
+- **前端**: React + TypeScript + Tailwind CSS + TanStack Table
 - **后端**: Rust + Tauri
 - **构建**: GitHub Actions
 
-## 📝 开发
+## 开发
 
 ```bash
 # 安装依赖
@@ -64,7 +88,7 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-## 🌿 分支管理
+## 分支管理
 
 | 分支 | 说明 |
 |------|------|
@@ -87,23 +111,27 @@ pnpm tauri build
 当 `develop` 分支开发完成并测试通过后，合并到 `main` 分支：
 
 ```bash
-# 切换到生产分支
 git checkout main
-
-# 合并开发分支
 git merge develop
-
-# 推送到远程
 git push origin main
 ```
 
 合并后会自动触发 GitHub Actions 构建并发布新版本。
 
-## 📄 许可证
+## 相关项目
+
+- [chmlfrp-toolbox-daemon](https://github.com/zhengddzz/chmlfrp-toolbox-daemon) - 服务器端远程管理守护进程
+
+## 开源声明
+
+本工具为社区开源项目，与 ChmlFrp 官方无隶属关系。
+UI 设计基于 [ChmlFrpLauncher](https://github.com/TechCat-Team/ChmlFrpLauncher)，功能由 [zhengddzz](https://github.com/zhengddzz) 开发。
+
+## 许可证
 
 [MIT License](LICENSE)
 
-## 🙏 致谢
+## 致谢
 
 - [Tauri](https://tauri.app/) - 跨平台桌面应用框架
-- [ChmlFrp](https://chmlfrp.cn/) - 免费内网穿透服务
+- [ChmlFrp](https://www.chmlfrp.net/) - 免费内网穿透服务

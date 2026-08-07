@@ -36,6 +36,17 @@ percent-encoding = "2.3"
 regex = "1.10"
 socket2 = "0.5"
 local-ip-address = "0.6"
+# 嵌入式数据库
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Windows DPAPI 敏感数据加密
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory"] }
+
+# 非 Windows 平台 AES-GCM fallback 加密
+[target.'cfg(not(windows))'.dependencies]
+aes-gcm = "0.10"
+machine-uid = "0.5"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
