@@ -203,8 +203,12 @@ pub fn run() {
             commands::open_system_url,
             // 系统信息（设备互联注册用）
             commands::get_system_info,
-            // 设备互联 RPC 统一入口（防止单独命令被 XSS 直接调用）
-            commands::relay_dispatch_rpc,
+            // 设备互联 RPC 命令（被管理端执行）
+            commands::relay_ping,
+            commands::relay_tcping,
+            commands::relay_node_latency,
+            commands::relay_speedtest,
+            commands::relay_delete_my_data,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

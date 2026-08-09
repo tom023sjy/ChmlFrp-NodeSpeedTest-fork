@@ -35,7 +35,7 @@ pub fn init(app_handle: &tauri::AppHandle) -> Result<(), String> {
     std::fs::create_dir_all(&app_data).map_err(|e| format!("创建数据目录失败: {}", e))?;
 
     let db_path = app_data.join(DB_FILE_NAME);
-    log::info!("数据库已初始化: {}", DB_FILE_NAME);
+    log::info!("数据库路径: {:?}", db_path);
 
     let conn = Connection::open(&db_path)
         .map_err(|e| format!("打开数据库失败: {}", e))?;

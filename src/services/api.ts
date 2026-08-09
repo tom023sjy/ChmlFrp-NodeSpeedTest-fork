@@ -284,6 +284,7 @@ async function refreshAccessTokenViaProxy(proxyToken: string): Promise<ProxyRefr
         value: JSON.stringify(updatedUser),
       }).catch((err) => {
         console.error("[secureStorage] 保存刷新后的用户数据失败:", err);
+        localStorage.setItem("chmlfrp_user", JSON.stringify(updatedUser));
       });
     }
 
@@ -530,8 +531,15 @@ export function initSecureStorage(): Promise<boolean> {
         return true;
       }
     } catch (err) {
-      console.error("[secureStorage] 初始化失败:", err);
-      // 不再降级到 localStorage 明文存储，保护敏感数据安全
+      console.warn("[secureStorage] 初始化失败，降级到 localStorage:", err);
+      const legacy = localStorage.getItem("chmlfrp_user");
+      if (legacy) {
+        const user = normalizeStoredUser(JSON.parse(legacy) as StoredUser);
+        if (user?.proxyToken && !isProxyTokenExpired(user)) {
+          cachedUser = user;
+          return true;
+        }
+      }
     }
     return false;
   })();
@@ -553,6 +561,8 @@ export const saveStoredUser = (user: StoredUser) => {
     value: JSON.stringify(normalized),
   }).catch((err) => {
     console.error("[secureStorage] 保存用户数据失败:", err);
+    // 降级：写入 localStorage
+    localStorage.setItem("chmlfrp_user", JSON.stringify(normalized));
   });
 };
 

@@ -432,8 +432,18 @@ pub fn append_log(_app_handle: &AppHandle, mut log: DdnsLog) {
 
 #[allow(dead_code)]
 pub fn gen_id() -> String {
-    // 使用 UUID v4 保证全局唯一性，避免快速连续生成时的碰撞
-    uuid::Uuid::new_v4().to_string()
+    format!("{:x}{:x}", Local::now().timestamp_millis(), rand_u32())
+}
+
+/// 简单伪随机（不引入 rand crate）
+#[allow(dead_code)]
+fn rand_u32() -> u32 {
+    use std::time::SystemTime;
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    nanos.wrapping_mul(2654435761)
 }
 
 /// 将给定时间戳格式化为本地时间 ISO 字符串

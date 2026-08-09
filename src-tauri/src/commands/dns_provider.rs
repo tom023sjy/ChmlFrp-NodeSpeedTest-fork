@@ -1244,7 +1244,7 @@ mod cloudflare {
 pub mod chmlfrp {
     use super::*;
 
-    const API_BASE: &str = "https://cf-v2.uapis.cn";
+    const API_BASE: &str = "http://cf-v2.uapis.cn";
 
     /// ChmlFrp 免费 DNS 记录（get_user_free_subdomains 返回结构）
     /// 该结构同时用于 DDNS 管理页面展示

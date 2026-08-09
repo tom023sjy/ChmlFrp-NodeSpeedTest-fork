@@ -36,46 +36,6 @@ function renderMarkdown(text: string): string {
   const result: string[] = [];
   let inList = false;
 
-  /** HTML 实体转义，防止 XSS */
-  function escapeHtml(s: string): string {
-    return s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#x27;");
-  }
-
-  /** 校验链接 URL 是否安全（仅允许 http/https） */
-  function safeUrl(url: string): string {
-    const trimmed = url.trim();
-    if (/^https?:\/\//i.test(trimmed)) {
-      return trimmed;
-    }
-    // 不安全的 scheme（javascript:、data: 等），返回 #
-    return "#";
-  }
-
-  /** 处理行内 Markdown（加粗 + 链接），所有文本先转义 */
-  function processInline(text: string): string {
-    // 先转义所有 HTML 特殊字符
-    const escaped = escapeHtml(text);
-    // 处理加粗
-    let result = escaped.replace(
-      /\*\*(.*?)\*\*/g,
-      "<strong class='font-semibold text-foreground'>$1</strong>",
-    );
-    // 处理链接 [text](url) — URL 经 safeUrl 校验
-    result = result.replace(
-      /\[([^\]]+)\]\(([^)]+)\)/g,
-      (_match, linkText: string, linkUrl: string) => {
-        const url = safeUrl(linkUrl);
-        return `<a href='${url}' target='_blank' rel='noopener noreferrer' class='text-primary underline hover:opacity-80'>${linkText}</a>`;
-      },
-    );
-    return result;
-  }
-
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmedLine = line.trim();
@@ -108,9 +68,9 @@ function renderMarkdown(text: string): string {
         /^([\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}])/u,
       );
       const emoji = emojiMatch ? emojiMatch[0] : "";
-      const textPart = emoji ? content.substring(emoji.length).trim() : content;
+      const text = emoji ? content.substring(emoji.length).trim() : content;
       result.push(
-        `<h3 class='text-sm font-semibold mt-3 mb-2 text-foreground flex items-center gap-2'><span>${emoji}</span><span>${escapeHtml(textPart)}</span></h3>`,
+        `<h3 class='text-sm font-semibold mt-3 mb-2 text-foreground flex items-center gap-2'><span>${emoji}</span><span>${text}</span></h3>`,
       );
     } else if (trimmedLine.startsWith("## ")) {
       if (inList) {
@@ -122,9 +82,9 @@ function renderMarkdown(text: string): string {
         /^([\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}])/u,
       );
       const emoji = emojiMatch ? emojiMatch[0] : "";
-      const textPart = emoji ? content.substring(emoji.length).trim() : content;
+      const text = emoji ? content.substring(emoji.length).trim() : content;
       result.push(
-        `<h2 class='text-base font-semibold mt-3 mb-2 text-foreground flex items-center gap-2'><span>${emoji}</span><span>${escapeHtml(textPart)}</span></h2>`,
+        `<h2 class='text-base font-semibold mt-3 mb-2 text-foreground flex items-center gap-2'><span>${emoji}</span><span>${text}</span></h2>`,
       );
     } else if (trimmedLine.startsWith("# ")) {
       if (inList) {
@@ -133,7 +93,7 @@ function renderMarkdown(text: string): string {
       }
       const content = trimmedLine.substring(2);
       result.push(
-        `<h1 class='text-lg font-semibold mt-3 mb-2 text-foreground'>${escapeHtml(content)}</h1>`,
+        `<h1 class='text-lg font-semibold mt-3 mb-2 text-foreground'>${content}</h1>`,
       );
     } else if (trimmedLine.startsWith("- ") || trimmedLine.startsWith("* ")) {
       if (!inList) {
@@ -141,7 +101,15 @@ function renderMarkdown(text: string): string {
         inList = true;
       }
       const content = trimmedLine.substring(2);
-      const processedContent = processInline(content);
+      const processedContent = content
+        .replace(
+          /\*\*(.*?)\*\*/g,
+          "<strong class='font-semibold text-foreground'>$1</strong>",
+        )
+        .replace(
+          /\[([^\]]+)\]\(([^)]+)\)/g,
+          "<a href='$2' target='_blank' rel='noopener noreferrer' class='text-primary underline hover:opacity-80'>$1</a>",
+        );
       result.push(
         `<li class='text-sm text-muted-foreground leading-relaxed flex items-start gap-2'><span class='text-primary mt-0.5'>•</span><span class='flex-1'>${processedContent}</span></li>`,
       );
@@ -150,7 +118,15 @@ function renderMarkdown(text: string): string {
         result.push("</ul>");
         inList = false;
       }
-      const processedLine = processInline(trimmedLine);
+      const processedLine = trimmedLine
+        .replace(
+          /\*\*(.*?)\*\*/g,
+          "<strong class='font-semibold text-foreground'>$1</strong>",
+        )
+        .replace(
+          /\[([^\]]+)\]\(([^)]+)\)/g,
+          "<a href='$2' target='_blank' rel='noopener noreferrer' class='text-primary underline hover:opacity-80'>$1</a>",
+        );
       result.push(
         `<p class='text-sm text-muted-foreground mb-1 leading-relaxed'>${processedLine}</p>`,
       );

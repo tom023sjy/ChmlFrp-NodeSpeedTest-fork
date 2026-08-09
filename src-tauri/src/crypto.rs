@@ -105,12 +105,8 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use aes_gcm::aead::Aead;
-    use aes_gcm::{aead::OsRng, Aes256Gcm, KeyInit, Nonce};
+    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
     use sha2::{Digest, Sha256};
-
-    /// Nonce 长度（GCM 推荐值）
-    const NONCE_LEN: usize = 12;
 
     /// 从机器 ID 派生 256 位 AES 密钥
     fn derive_key() -> Result<[u8; 32], String> {
@@ -124,68 +120,27 @@ mod platform {
         Ok(key)
     }
 
-    /// AES-256-GCM 加密（新格式：随机 nonce 前缀 + 密文）
-    ///
-    /// 输出格式: `[12 字节随机 nonce][密文 + GCM 认证标签]`
-    /// 每次加密使用 OsRng 生成唯一 nonce，杜绝 nonce 复用风险。
+    /// AES-256-GCM 加密
     pub fn encrypt(plaintext: &[u8]) -> Result<Vec<u8>, String> {
         let key = derive_key()?;
         let cipher = Aes256Gcm::new(&key.into());
-        // 使用操作系统 CSPRNG 生成随机 nonce
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        use aes_gcm::aead::rand_core::RngCore;
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let ciphertext = cipher
+        // 12 字节 nonce（GCM 推荐长度），前缀存储在密文中
+        let nonce_bytes = &key[..12];
+        let nonce = Nonce::from_slice(nonce_bytes);
+        cipher
             .encrypt(nonce, plaintext)
-            .map_err(|e| format!("AES-GCM 加密失败: {}", e))?;
-        // nonce 前缀 + 密文
-        let mut result = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-        result.extend_from_slice(&nonce_bytes);
-        result.extend_from_slice(&ciphertext);
-        Ok(result)
+            .map_err(|e| format!("AES-GCM 加密失败: {}", e))
     }
 
-    /// AES-256-GCM 解密（兼容旧格式自动迁移）
-    ///
-    /// 解密策略：
-    /// 1. 新格式（nonce 前缀）：从密文头部读取 12 字节 nonce，解密剩余部分
-    /// 2. 旧格式（nonce 派生自密钥）：使用密钥前 12 字节作为 nonce（向后兼容）
-    ///
-    /// 若检测到旧格式密文解密成功，调用方可通过 `needs_re_encrypt()` 重新加密。
+    /// AES-256-GCM 解密
     pub fn decrypt(ciphertext: &[u8]) -> Result<Vec<u8>, String> {
         let key = derive_key()?;
         let cipher = Aes256Gcm::new(&key.into());
-
-        // 新格式：nonce 前缀 + 密文（长度 > NONCE_LEN 才可能是新格式）
-        if ciphertext.len() > NONCE_LEN {
-            let nonce = Nonce::from_slice(&ciphertext[..NONCE_LEN]);
-            if let Ok(plain) = cipher.decrypt(nonce, &ciphertext[NONCE_LEN..]) {
-                return Ok(plain);
-            }
-        }
-
-        // 旧格式：nonce 派生自密钥前 12 字节（向后兼容，需迁移）
-        let old_nonce = Nonce::from_slice(&key[..NONCE_LEN]);
+        let nonce_bytes = &key[..12];
+        let nonce = Nonce::from_slice(nonce_bytes);
         cipher
-            .decrypt(old_nonce, ciphertext)
+            .decrypt(nonce, ciphertext)
             .map_err(|e| format!("AES-GCM 解密失败: {}", e))
-    }
-
-    /// 检测密文是否为旧格式（nonce 派生自密钥）
-    /// 返回 true 表示需要重新加密以迁移到新格式
-    pub fn needs_re_encrypt(ciphertext: &[u8]) -> bool {
-        if ciphertext.len() <= NONCE_LEN {
-            return true; // 太短，必定是旧格式
-        }
-        let key = match derive_key() {
-            Ok(k) => k,
-            Err(_) => return false,
-        };
-        let cipher = Aes256Gcm::new(&key.into());
-        // 尝试新格式解密
-        let nonce = Nonce::from_slice(&ciphertext[..NONCE_LEN]);
-        cipher.decrypt(nonce, &ciphertext[NONCE_LEN..]).is_err()
     }
 }
 

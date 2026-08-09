@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   MonitorSmartphone,
+  RefreshCw,
   Loader2,
   Inbox,
   PlugZap,
@@ -51,27 +52,18 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
   const [renameValue, setRenameValue] = useState("");
   const [renamingLoading, setRenamingLoading] = useState(false);
 
-  // in-flight 守卫：防止高频轮询时请求重叠（上次未返回就发起下一次）
-  const loadingRef = useRef(false);
-  const load = useCallback(async (silent = false) => {
+  const load = useCallback(async () => {
     if (!isLoggedIn) {
       setDevices([]);
       return;
     }
-    // 静默刷新时若已有请求在飞，跳过本次（避免 2 秒轮询堆积请求）
-    if (silent && loadingRef.current) return;
-    loadingRef.current = true;
-    if (!silent) setLoading(true);
+    setLoading(true);
     try {
       setDevices(await listDevices());
     } catch (e) {
-      // 静默刷新时不弹 toast，避免定时轮询频繁报错
-      if (!silent) {
-        toast.error(e instanceof Error ? e.message : "加载设备列表失败");
-      }
+      toast.error(e instanceof Error ? e.message : "加载设备列表失败");
     } finally {
-      loadingRef.current = false;
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
   }, [isLoggedIn]);
 
@@ -86,10 +78,10 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
     setConnected(relay.isConnected());
     const unlistenConn = relay.onConnectionChange((c) => setConnected(c));
     const unlistenOnline = relay.on("device_online", () => {
-      void load(true);
+      void load();
     });
     const unlistenOffline = relay.on("device_offline", () => {
-      void load(true);
+      void load();
     });
     return () => {
       unlistenConn();
@@ -97,15 +89,6 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
       unlistenOffline();
     };
   }, [load]);
-
-  // 定时轮询：每 2 秒静默刷新设备列表（补充 relay 事件，提高实时性）
-  useEffect(() => {
-    if (!isLoggedIn) return;
-    const interval = setInterval(() => {
-      void load(true);
-    }, 2_000);
-    return () => clearInterval(interval);
-  }, [isLoggedIn, load]);
 
   // 打开重命名对话框
   const handleOpenRename = (device: DeviceInfo) => {
@@ -225,7 +208,21 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
               {connected ? "已连接" : "未连接"}
             </div>
           )}
-          {/* 设备列表每 2 秒自动刷新，无需手动刷新按钮 */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={load}
+            disabled={!isLoggedIn || loading}
+            className="gap-1.5"
+            title={!isLoggedIn ? "请先登录" : undefined}
+          >
+            {loading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            刷新
+          </Button>
         </div>
       </div>
 

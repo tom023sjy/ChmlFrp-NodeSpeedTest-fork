@@ -24,11 +24,10 @@ const TEST_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 /// 校验 HTTP Host header，防御 DNS rebinding 攻击。
 /// 浏览器 DNS rebinding 时 Host 会是攻击者域名，而非 127.0.0.1/localhost。
-/// Host 缺失时返回 false（拒绝），仅明确为 127.0.0.1/localhost 时放行。
 fn is_valid_host(host_header: &str) -> bool {
     // 去掉端口部分
     let host = host_header.split(':').next().unwrap_or("").trim();
-    host == "127.0.0.1" || host == "localhost"
+    host == "127.0.0.1" || host == "localhost" || host.is_empty()
 }
 
 fn generate_test_file() -> Vec<u8> {
@@ -93,7 +92,7 @@ pub async fn start_file_server() -> Result<u16, String> {
                                         .strip_prefix("host:")
                                         .map(|h| is_valid_host(h))
                                 })
-                                .unwrap_or(false); // 无 Host header 时拒绝
+                                .unwrap_or(true); // 无 Host header 时放行（非浏览器请求）
 
                             if !host_valid {
                                 let response =

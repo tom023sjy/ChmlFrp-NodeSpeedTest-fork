@@ -258,6 +258,8 @@ export function Sidebar({
       id: "dns-management",
       label: "DDNS 解析",
       icon: Globe,
+      beta: true,
+      betaTitle: "Beta 测试功能：此功能仍在测试阶段，可能出现数据异常、功能不稳定等问题，开发者不承担任何由此造成的损失或责任，请谨慎使用。",
     },
     {
       id: "ssl-certs",
