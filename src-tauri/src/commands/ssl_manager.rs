@@ -107,7 +107,6 @@ fn authed_request(
     client
         .request(method, &url)
         .header("Authorization", format!("Bearer {}", access_token))
-        .query(&[("token", access_token)])
 }
 
 /// 解析 SSL API 响应（统一结构 {msg, code, data, state}）

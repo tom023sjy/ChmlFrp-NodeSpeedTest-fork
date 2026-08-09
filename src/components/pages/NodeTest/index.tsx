@@ -26,15 +26,18 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
-import { Network, RefreshCw, CheckCircle2, XCircle, Clock, Filter, History, Globe, Users, ArrowUpDown, ArrowUp, ArrowDown, Search, CheckSquare, Square, SquareX, Download, Zap, Loader2 } from "lucide-react";
+import { Network, RefreshCw, CheckCircle2, XCircle, Clock, Filter, History, Globe, Users, ArrowUpDown, ArrowUp, ArrowDown, Search, CheckSquare, Square, SquareX, Download, Zap, Loader2, ArrowRightLeft } from "lucide-react";
 import { toast } from "sonner";
 import { fetchNodes, type Node, type StoredUser } from "@/services/api";
 import { getInitialEffectType, type EffectType } from "@/lib/settings-utils";
 import { SpeedTestDialog, getBatchTestState, subscribeBatchTestState, requestStopBatchTest, requestForceStopBatchTest, requestCancelStopBatchTest } from "@/components/dialogs/BatchSpeedTestDialog";
 import { BatchTestFloatingWidget } from "@/components/dialogs/BatchTestFloatingWidget";
 import { NodeHistoryDialog } from "@/components/dialogs/NodeHistoryDialog";
+import { E2ETestDialog, getE2ETestState, subscribeE2ETestState, requestStopE2ETest, requestForceStopE2ETest, requestCancelStopE2ETest } from "@/components/dialogs/E2ETestDialog";
+import { E2ETestFloatingWidget } from "@/components/dialogs/E2ETestFloatingWidget";
 import { addTestHistory } from "@/services/testHistoryService";
 import { reportUsage } from "@/services/backendApi";
+import { listDevices } from "@/services/deviceApi";
 
 interface NodeTestProps {
   user: StoredUser | null;
@@ -213,9 +216,15 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [batchTestNodes, setBatchTestNodes] = useState<NodeWithTest[] | null>(null);
   const [showBatchTestDialog, setShowBatchTestDialog] = useState(false);
+  const [showE2ETestDialog, setShowE2ETestDialog] = useState(false);
+  const [hasOnlineDevices, setHasOnlineDevices] = useState(false);
   const [historyNode, setHistoryNode] = useState<{ node: NodeWithTest; type: "latency" | "speed" } | null>(null);
   // 批量测试是否处于软停止中（用于顶栏显示"取消停止"和"强制停止"按钮）
   const [isBatchStopping, setIsBatchStopping] = useState(false);
+  // 端对端测试是否运行中（用于顶栏显示"端对端测试中..."和停止按钮）
+  const [testingE2E, setTestingE2E] = useState(false);
+  // 端对端测试是否处于软停止中
+  const [isE2EStopping, setIsE2EStopping] = useState(false);
 
   // ===== TanStack Table 状态 =====
   // 排序状态（默认按编号升序）
@@ -288,6 +297,26 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
       }
       // 同步软停止状态
       setIsBatchStopping(state.isStopping);
+    });
+  }, []);
+
+  // 使用 ref 保存最新的 testingE2E 值，避免订阅频繁取消和重注册导致丢失通知
+  const testingE2ERef = useRef(testingE2E);
+  useEffect(() => {
+    testingE2ERef.current = testingE2E;
+  }, [testingE2E]);
+
+  // 订阅端对端测试全局状态，联动顶栏显示
+  useEffect(() => {
+    return subscribeE2ETestState(() => {
+      const state = getE2ETestState();
+      if (state.isRunning && !testingE2ERef.current) {
+        setTestingE2E(true);
+      }
+      if (!state.isRunning && testingE2ERef.current) {
+        setTestingE2E(false);
+      }
+      setIsE2EStopping(state.isStopping);
     });
   }, []);
 
@@ -425,8 +454,8 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
   }, [nodes]);
 
   useEffect(() => {
-    onTestingChange?.(testingAll);
-  }, [testingAll, onTestingChange]);
+    onTestingChange?.(testingAll || testingE2E);
+  }, [testingAll, testingE2E, onTestingChange]);
 
   useEffect(() => {
     return () => {
@@ -456,12 +485,54 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
     toast.info("已取消停止，继续测试");
   }, []);
 
+  const stopE2ETest = useCallback(() => {
+    // 通过全局停止处理器通知 E2ETestDialog 停止测试
+    requestStopE2ETest();
+    toast.info("将在当前节点测试完成后停止");
+  }, []);
+
+  const forceE2EStop = useCallback(() => {
+    requestForceStopE2ETest();
+    toast.warning("正在强制停止测试...");
+  }, []);
+
+  const cancelE2EStop = useCallback(() => {
+    requestCancelStopE2ETest();
+    toast.info("已取消停止，继续测试");
+  }, []);
+
   useEffect(() => {
     if (user) {
       void loadNodes();
       loadHistory();
     }
   }, [user, loadNodes, loadHistory]);
+
+  // 检查是否有其他在线设备（用于端对端测试按钮可用性）
+  useEffect(() => {
+    if (!user) {
+      setHasOnlineDevices(false);
+      return;
+    }
+    let cancelled = false;
+    const checkDevices = async () => {
+      try {
+        const devices = await listDevices();
+        if (!cancelled) {
+          setHasOnlineDevices(devices.some((d) => d.isOnline && !d.isCurrent));
+        }
+      } catch {
+        if (!cancelled) setHasOnlineDevices(false);
+      }
+    };
+    void checkDevices();
+    // 定期刷新（每 30 秒）
+    const interval = setInterval(checkDevices, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user]);
 
   const toggleSelectNode = useCallback((nodeId: number) => {
     setSelectedNodeIds((prev) => {
@@ -841,6 +912,62 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
               </>
             )}
           </Button>
+          {testingE2E ? (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowE2ETestDialog(true)}
+                className="h-8 px-3 text-xs"
+              >
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                端对端测试中...
+              </Button>
+              {isE2EStopping ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={cancelE2EStop}
+                    className="h-8 px-3 text-xs"
+                  >
+                    取消停止
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={forceE2EStop}
+                    className="h-8 px-3 text-xs"
+                  >
+                    <SquareX className="h-3.5 w-3.5 mr-1.5" />
+                    强制停止
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={stopE2ETest}
+                  className="h-8 px-3 text-xs"
+                >
+                  <SquareX className="h-3.5 w-3.5 mr-1.5" />
+                  停止
+                </Button>
+              )}
+            </>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowE2ETestDialog(true)}
+              disabled={!isLoggedIn || !hasOnlineDevices || testingAll}
+              className="h-8 px-3 text-xs"
+              title={!isLoggedIn ? "请先登录" : !hasOnlineDevices ? "没有其他在线设备" : testingAll ? "节点测试进行中" : "端对端测试"}
+            >
+              <ArrowRightLeft className="h-3.5 w-3.5 mr-1.5" />
+              {visibleSelectedCount > 0 ? `端对端测试 (${visibleSelectedCount})` : "全部端对端测试"}
+            </Button>
+          )}
           {!showHistory && (
             testingAll ? (
               <>
@@ -889,9 +1016,9 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
               <Button
                 size="sm"
                 onClick={openBatchSpeedTestWithNodes}
-                disabled={!isLoggedIn || loading || (visibleSelectedCount === 0 && filteredNodes.length === 0)}
+                disabled={!isLoggedIn || loading || testingE2E || (visibleSelectedCount === 0 && filteredNodes.length === 0)}
                 className="h-8 px-3 text-xs"
-                title={!isLoggedIn ? "请先登录" : undefined}
+                title={!isLoggedIn ? "请先登录" : testingE2E ? "端对端测试进行中" : undefined}
               >
                 <Zap className="h-3.5 w-3.5 mr-1.5" />
                 {visibleSelectedCount > 0 ? `节点测试 (${visibleSelectedCount})` : "全部测试"}
@@ -965,7 +1092,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
           加载中...
         </div>
       ) : showHistory ? (
-        <div className={cn(
+        <div key="history-view" className={cn(
           "flex-1 min-h-0 rounded-md border bg-card overflow-y-auto visible-scrollbar",
           effectType === "frosted" && "backdrop-blur-md bg-card/80",
           effectType === "translucent" && "bg-card/80",
@@ -1062,6 +1189,7 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
         </Empty>
       ) : (
         <div
+          key="nodes-view"
           ref={tableContainerRef}
           className={cn(
             "thead-locked h-scroll-outer flex-1 min-h-0 rounded-md border bg-card overflow-auto visible-scrollbar",
@@ -1319,6 +1447,21 @@ export function NodeTest({ user, onTestingChange }: NodeTestProps) {
         nodeId={historyNode?.node.id || 0}
         type={historyNode?.type || "latency"}
         username={username}
+      />
+
+      <E2ETestDialog
+        isOpen={showE2ETestDialog}
+        onClose={() => setShowE2ETestDialog(false)}
+        nodes={
+          visibleSelectedCount > 0
+            ? filteredNodes.filter((n) => selectedNodeIds.has(n.id))
+            : filteredNodes
+        }
+      />
+
+      <E2ETestFloatingWidget
+        onExpand={() => setShowE2ETestDialog(true)}
+        isDialogOpen={showE2ETestDialog}
       />
     </div>
   );

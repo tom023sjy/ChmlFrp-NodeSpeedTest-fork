@@ -207,7 +207,7 @@ export class DeviceRelayClient {
         resolve: (v: RpcResponse) => {
           clearTimeout(timer);
           unlistenProgress?.();
-          (resolve as (v: RpcResponse<T>) => void)(v);
+          resolve(v as RpcResponse<T>);
         },
         reject: (e: Error) => {
           clearTimeout(timer);

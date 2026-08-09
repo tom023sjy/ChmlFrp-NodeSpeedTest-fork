@@ -53,6 +53,14 @@ fn generate_config_file(
     file.write_all(config_content.as_bytes())
         .map_err(|e| format!("写入配置文件失败: {}", e))?;
 
+    // 设置文件权限为 0600（仅所有者可读写），防止其他用户读取 frpc Token
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("设置文件权限失败: {}", e))?;
+    }
+
     Ok(config_path)
 }
 
