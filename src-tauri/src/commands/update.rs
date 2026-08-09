@@ -142,11 +142,20 @@ fn verify_sha256(file_path: &Path, expected_hash: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 获取更新安装包下载目录
+/// 获取更新安装包下载目录（应用专属，权限受限）
 fn get_download_dir() -> Result<PathBuf, String> {
     let temp_dir = std::env::temp_dir();
     let download_dir = temp_dir.join("chmlfrp-node-recommender-updates");
     std::fs::create_dir_all(&download_dir).map_err(|e| format!("创建下载目录失败: {}", e))?;
+
+    // Unix 下设置目录权限为 0700（仅所有者可访问），防止其他用户窃取安装包
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&download_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("设置下载目录权限失败: {}", e))?;
+    }
+
     Ok(download_dir)
 }
 
@@ -363,6 +372,20 @@ pub async fn clear_pending_installer(
 /// 流程：等待主应用退出 → NSIS /S 静默安装 → Start-Process 启动新应用（无 cmd 窗口）
 /// 返回 true 表示后台进程已成功启动
 fn launch_silent_update_background(installer_path: &str) -> bool {
+    // 路径白名单校验：安装包必须位于下载目录内，防止路径注入
+    let download_dir = match get_download_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("获取下载目录失败: {}", e);
+            return false;
+        }
+    };
+    let installer_path_buf = std::path::Path::new(installer_path);
+    if !installer_path_buf.starts_with(&download_dir) {
+        log::error!("安装包路径不在下载目录内，拒绝执行: {}", installer_path);
+        return false;
+    }
+
     let app_exe = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(e) => {

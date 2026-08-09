@@ -10,7 +10,7 @@
 //! - `relay_speedtest`：HTTP 带宽测试（下载/上传，进度推送）
 //! - `relay_delete_my_data`：桌面端不支持，返回 NOT_SUPPORTED
 
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs, IpAddr};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -155,7 +155,87 @@ fn build_ping_stat(rtts: Vec<f64>, loss: u32) -> PingStat {
 }
 
 #[tauri::command]
-pub async fn relay_ping(host: String, count: Option<u32>) -> Result<PingStat, String> {
+pub async fn relay_dispatch_rpc(
+    app_handle: tauri::AppHandle,
+    command: String,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    info!("[relay] dispatch_rpc: command={}", command);
+    match command.as_str() {
+        "ping" => {
+            let p: PingParams = serde_json::from_value(params)
+                .map_err(|e| format!("参数解析失败: {}", e))?;
+            let result = relay_ping_inner(p.host, p.count).await?;
+            serde_json::to_value(result).map_err(|e| format!("序列化失败: {}", e))
+        }
+        "tcping" => {
+            let p: TcpingParams = serde_json::from_value(params)
+                .map_err(|e| format!("参数解析失败: {}", e))?;
+            let result = relay_tcping_inner(p.host, p.port, p.count, p.timeout_secs).await?;
+            serde_json::to_value(result).map_err(|e| format!("序列化失败: {}", e))
+        }
+        "node_latency" => {
+            let p: NodeLatencyParams = serde_json::from_value(params)
+                .map_err(|e| format!("参数解析失败: {}", e))?;
+            let result = relay_node_latency_inner(p.node, p.port, p.count).await?;
+            serde_json::to_value(result).map_err(|e| format!("序列化失败: {}", e))
+        }
+        "speedtest" => {
+            let p: SpeedtestParams = serde_json::from_value(params)
+                .map_err(|e| format!("参数解析失败: {}", e))?;
+            let result = relay_speedtest_inner(
+                app_handle,
+                p.request_id,
+                p.url,
+                p.direction,
+                p.duration_secs,
+                p.threads,
+            )
+            .await?;
+            serde_json::to_value(result).map_err(|e| format!("序列化失败: {}", e))
+        }
+        "delete_my_data" => {
+            Err("NOT_SUPPORTED: 桌面客户端不支持删除设备数据".to_string())
+        }
+        other => Err(format!("未知命令: {}", other)),
+    }
+}
+
+// ===== 内部参数结构（反序列化用，不暴露为 Tauri 命令）=====
+
+#[derive(serde::Deserialize)]
+struct PingParams {
+    host: String,
+    count: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct TcpingParams {
+    host: String,
+    port: u16,
+    count: Option<u32>,
+    timeout_secs: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct NodeLatencyParams {
+    node: String,
+    port: u16,
+    count: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct SpeedtestParams {
+    request_id: String,
+    url: String,
+    direction: String,
+    duration_secs: Option<u32>,
+    threads: Option<u32>,
+}
+
+// ===== ping 实现 =====
+
+async fn relay_ping_inner(host: String, count: Option<u32>) -> Result<PingStat, String> {
     let count = count.unwrap_or(4);
     info!("[relay] ping {} count={}", host, count);
     let (rtts, loss) = tokio::task::spawn_blocking(move || run_ping(&host, count))
@@ -181,8 +261,7 @@ fn tcping_once(host: &str, port: u16, timeout_secs: u64) -> Result<f64, String> 
     }
 }
 
-#[tauri::command]
-pub async fn relay_tcping(
+async fn relay_tcping_inner(
     host: String,
     port: u16,
     count: Option<u32>,
@@ -214,8 +293,7 @@ pub async fn relay_tcping(
 
 // ===== node_latency 组合命令 =====
 
-#[tauri::command]
-pub async fn relay_node_latency(
+async fn relay_node_latency_inner(
     node: String,
     port: u16,
     count: Option<u32>,
@@ -260,8 +338,68 @@ const SPEEDTEST_PROGRESS_EVENT: &str = "relay-speedtest-progress";
 const SPEEDTEST_CHUNK_SIZE: usize = 64 * 1024;
 const SPEEDTEST_REPORT_INTERVAL: Duration = Duration::from_millis(200);
 
-#[tauri::command]
-pub async fn relay_speedtest(
+/// SSRF 防护：校验 URL 是否安全
+///
+/// 拒绝以下情况：
+/// - 非 HTTP/HTTPS scheme
+/// - 主机解析到内网地址（RFC1918）、回环地址、链路本地地址
+/// - 云元数据 IP（169.254.169.254）
+/// - 主机名为 IP 字面量且属于上述禁止范围
+fn validate_speedtest_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("URL 解析失败: {}", e))?;
+
+    // 仅允许 HTTP/HTTPS
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("不支持的协议: {}（仅允许 http/https）", other)),
+    }
+
+    let host = parsed.host_str().ok_or("URL 缺少主机名")?;
+
+    // 如果是 IP 字面量，直接校验
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_blocked_ip(&ip) {
+            return Err(format!("目标地址 {} 不允许访问（内网/回环/链路本地地址）", ip));
+        }
+        return Ok(());
+    }
+
+    // 域名：解析后检查所有 IP 地址
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addr_str = format!("{}:{}", host, port);
+    let addrs = addr_str.to_socket_addrs()
+        .map_err(|e| format!("域名解析失败: {}", e))?;
+
+    for addr in addrs {
+        let ip = addr.ip();
+        if is_blocked_ip(&ip) {
+            return Err(format!("域名 {} 解析到禁止地址 {}（内网/回环/链路本地）", host, ip));
+        }
+    }
+
+    Ok(())
+}
+
+/// 判断 IP 是否属于禁止访问的范围
+fn is_blocked_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()           // 127.0.0.0/8
+                || v4.is_private()      // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_link_local()   // 169.254.0.0/16（含云元数据 169.254.169.254）
+                || v4.is_unspecified()  // 0.0.0.0
+                || v4.is_broadcast()    // 255.255.255.255
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()           // ::1
+                || v6.is_unspecified()  // ::
+                || (v6.segments()[0] & 0xfe00) == 0xfc00  // ULA fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80  // 链路本地 fe80::/10
+        }
+    }
+}
+
+async fn relay_speedtest_inner(
     app_handle: tauri::AppHandle,
     request_id: String,
     url: String,
@@ -271,6 +409,20 @@ pub async fn relay_speedtest(
 ) -> Result<SpeedtestResult, String> {
     let duration_secs = duration_secs.unwrap_or(10).min(60);
     let _threads = threads.unwrap_or(4).max(1).min(16);
+
+    // SSRF 防护：校验 URL 安全性
+    if let Err(e) = validate_speedtest_url(&url) {
+        warn!("[relay] speedtest URL 被拒绝: {}", e);
+        return Ok(SpeedtestResult {
+            success: false,
+            download_speed_mbps: 0.0,
+            upload_speed_mbps: 0.0,
+            latency_ms: None,
+            jitter_ms: None,
+            error: Some(e),
+        });
+    }
+
     info!(
         "[relay] speedtest url={} direction={} duration={}s",
         url, direction, duration_secs
@@ -509,11 +661,4 @@ async fn run_upload_speedtest(
     Ok((0.0, speed_mbps))
 }
 
-// ===== delete_my_data（桌面端不支持）=====
-
-#[tauri::command]
-pub async fn relay_delete_my_data() -> Result<serde_json::Value, String> {
-    // 桌面客户端不支持删除多租户数据，返回 NOT_SUPPORTED
-    // Daemon 才需要实现此命令
-    Err("NOT_SUPPORTED: 桌面客户端不支持删除设备数据".to_string())
-}
+// ===== delete_my_data（桌面端不支持，已在 dispatch_rpc 中直接返回 NOT_SUPPORTED）=====
