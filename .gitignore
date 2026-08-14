@@ -7,6 +7,7 @@ dist/
 src-tauri/target/
 
 # IDE
+.trae/
 .vscode/
 .idea/
 *.swp
