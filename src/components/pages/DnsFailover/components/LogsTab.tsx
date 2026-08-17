@@ -5,6 +5,7 @@ import { ScrollText, Trash2, RefreshCw, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { type StoredUser } from "@/services/api";
 import { dnsFailoverService, type DnsSwitchLog } from "@/services/dnsFailoverService";
+import { dnsFailoverCloudService } from "@/services/dnsFailoverCloudService";
 import { useEffectType, getCardClassName } from "@/lib/useEffectType";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
@@ -16,6 +17,7 @@ export function LogsTab({ user }: LogsTabProps) {
   const confirm = useConfirm();
   const [list, setList] = useState<DnsSwitchLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [cloudMode, setCloudMode] = useState(false);
   const effectType = useEffectType();
 
   const load = useCallback(async () => {
@@ -26,7 +28,18 @@ export function LogsTab({ user }: LogsTabProps) {
     }
     setLoading(true);
     try {
-      setList(await dnsFailoverService.listLogs(user.username));
+      try {
+        const tasks = await dnsFailoverCloudService.listTasks();
+        const pages = await Promise.all(tasks.map(async (task) => {
+          const page = await dnsFailoverCloudService.listLogs(task.id);
+          return page.logs.map((log) => ({ ...log, taskName: log.taskName || task.name }));
+        }));
+        setList(pages.flat().sort((a, b) => b.time.localeCompare(a.time)));
+        setCloudMode(true);
+      } catch {
+        setList(await dnsFailoverService.listLogs(user.username));
+        setCloudMode(false);
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "加载日志失败");
     } finally {
@@ -48,7 +61,12 @@ export function LogsTab({ user }: LogsTabProps) {
     });
     if (!ok) return;
     try {
-      await dnsFailoverService.clearLogs(user.username);
+      if (cloudMode) {
+        const tasks = await dnsFailoverCloudService.listTasks();
+        await Promise.all(tasks.map((task) => dnsFailoverCloudService.clearLogs(task.id)));
+      } else {
+        await dnsFailoverService.clearLogs(user.username);
+      }
       toast.success("已清空");
       load();
     } catch (e) {

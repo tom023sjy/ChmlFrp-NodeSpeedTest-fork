@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,8 @@ import {
   ArrowRight,
   Settings2,
   RefreshCw,
+  Cloud,
+  Monitor,
 } from "lucide-react";
 import { toast } from "sonner";
 import { type StoredUser, fetchTunnels, type Tunnel } from "@/services/api";
@@ -41,6 +43,19 @@ import { ddnsService, type ChmlfrpAvailableDomain } from "@/services/ddnsService
 import { TunnelSelect } from "./TunnelSelect";
 import { useEffectType, getCardClassName } from "@/lib/useEffectType";
 import { reportUsage } from "@/services/backendApi";
+import {
+  dnsFailoverCloudService,
+  type ExecutionTargetInfo,
+} from "@/services/dnsFailoverCloudService";
+import { getDeviceId } from "@/services/deviceId";
+import { migrateDnsFailoverToCloud } from "@/services/dnsFailoverMigration";
+import { getRelayClient } from "@/services/deviceRelay";
+import {
+  isDnsFailoverSnapshotEqual,
+  readDnsFailoverSnapshot,
+  writeDnsFailoverSnapshot,
+  type DnsFailoverSnapshot,
+} from "@/services/dnsFailoverCache";
 
 interface TasksTabProps {
   user?: StoredUser | null;
@@ -64,6 +79,7 @@ const EMPTY_TASK: DnsMonitorTask = {
   checkMethods: ["tunnel_state", "node_state"],
   failMethodThreshold: 1,
   tcpingTimeoutSecs: 3,
+  executionTarget: { type: "cloud", id: "xian-cloud" },
 };
 
 /** 检测方式元数据：标签、说明、优缺点 */
@@ -90,17 +106,31 @@ const CHECK_METHOD_META: Record<string, { label: string; desc: string; pros: str
 
 export function TasksTab({ user }: TasksTabProps) {
   const confirm = useConfirm();
-  const [list, setList] = useState<DnsMonitorTask[]>([]);
-  const [credentials, setCredentials] = useState<DnsCredential[]>([]);
-  const [runtime, setRuntime] = useState<Record<string, TaskRuntime>>({});
+  const initialSnapshot = user?.username ? readDnsFailoverSnapshot(user.username) : null;
+  const snapshotRef = useRef<DnsFailoverSnapshot | null>(initialSnapshot);
+  const [list, setList] = useState<DnsMonitorTask[]>(initialSnapshot?.tasks ?? []);
+  const [credentials, setCredentials] = useState<DnsCredential[]>(initialSnapshot?.credentials ?? []);
+  const [runtime, setRuntime] = useState<Record<string, TaskRuntime>>(initialSnapshot?.runtime ?? {});
   const [tunnels, setTunnels] = useState<Tunnel[]>([]);
   const [tunnelsLoading, setTunnelsLoading] = useState(false);
   const [chmlfrpDomains, setChmlfrpDomains] = useState<ChmlfrpAvailableDomain[]>([]);
   const [chmlfrpDomainsLoading, setChmlfrpDomainsLoading] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialSnapshot);
   const [editing, setEditing] = useState<DnsMonitorTask | null>(null);
   const [checkingTaskIds, setCheckingTaskIds] = useState<Set<string>>(new Set());
+  const [executionTargets, setExecutionTargets] = useState<ExecutionTargetInfo[]>(initialSnapshot?.executionTargets ?? []);
+  const [cloudMode, setCloudMode] = useState(!!initialSnapshot);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
+  const [localDeviceId, setLocalDeviceId] = useState<string | null>(null);
   const effectType = useEffectType();
+
+  const applySnapshot = useCallback((snapshot: DnsFailoverSnapshot) => {
+    setList(snapshot.tasks);
+    setCredentials(snapshot.credentials);
+    setExecutionTargets(snapshot.executionTargets);
+    setRuntime(snapshot.runtime);
+    snapshotRef.current = snapshot;
+  }, []);
 
   const load = useCallback(async () => {
     if (!user?.username) {
@@ -110,22 +140,80 @@ export function TasksTab({ user }: TasksTabProps) {
       setRuntime({});
       return;
     }
-    setLoading(true);
+    const cached = readDnsFailoverSnapshot(user.username);
+    if (cached) {
+      applySnapshot(cached);
+      setCloudMode(true);
+      setLoading(false);
+    } else {
+      setList([]);
+      setCredentials([]);
+      setExecutionTargets([]);
+      setRuntime({});
+      snapshotRef.current = null;
+      setLoading(true);
+    }
     try {
-      const [tasks, creds, rt] = await Promise.all([
-        dnsFailoverService.listTasks(user.username),
-        dnsFailoverService.listCredentials(user.username),
-        dnsFailoverService.listRuntime(user.username),
-      ]);
-      setList(tasks);
-      setCredentials(creds);
-      setRuntime(rt);
+      try {
+        await migrateDnsFailoverToCloud(user);
+        const [tasks, creds, targets] = await Promise.all([
+          dnsFailoverCloudService.listTasks(),
+          dnsFailoverCloudService.listCredentials(),
+          dnsFailoverCloudService.listExecutionTargets(),
+        ]);
+        const nextSnapshot: DnsFailoverSnapshot = {
+          tasks,
+          credentials: creds,
+          executionTargets: targets,
+          runtime: Object.fromEntries(tasks.map((task) => [task.id, {
+          primaryFailCount: 0,
+          primarySuccessCount: 0,
+          activeTunnelName: task.primaryTunnel.tunnelName,
+          failedOver: false,
+          lastCheck: task.lastSyncAt ?? "",
+          lastResult: task.runtimeStatus ?? "",
+          nextCheckAt: 0,
+          status: task.runtimeStatus,
+          executorOnline: task.executorOnline,
+          lastSyncAt: task.lastSyncAt,
+          }])),
+          updatedAt: new Date().toISOString(),
+        };
+        if (!snapshotRef.current || !isDnsFailoverSnapshotEqual(snapshotRef.current, nextSnapshot)) {
+          applySnapshot(nextSnapshot);
+          writeDnsFailoverSnapshot(user.username, nextSnapshot);
+        }
+        setCloudMode(true);
+        setSyncWarning(null);
+      } catch (cloudError) {
+        if (cached) {
+          setCloudMode(true);
+          setSyncWarning(cloudError instanceof Error ? cloudError.message : "云端同步暂不可用");
+          return;
+        }
+        const [tasks, creds, rt, deviceId] = await Promise.all([
+          dnsFailoverService.listTasks(user.username),
+          dnsFailoverService.listCredentials(user.username),
+          dnsFailoverService.listRuntime(user.username),
+          getDeviceId(),
+        ]);
+        setList(tasks.map((task) => ({
+          ...task,
+          executionTarget: task.executionTarget ?? { type: "device", id: deviceId },
+        })));
+        setCredentials(creds);
+        setRuntime(rt);
+        setExecutionTargets([]);
+        setLocalDeviceId(deviceId);
+        setCloudMode(false);
+        setSyncWarning(cloudError instanceof Error ? cloudError.message : "云端同步暂不可用");
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, [user?.username]);
+  }, [applySnapshot, user?.username]);
 
   // 仅在新建/编辑任务打开对话框时加载隧道列表
   // 避免每次进入 DNS 容灾页面都等待隧道 API 响应
@@ -169,7 +257,18 @@ export function TasksTab({ user }: TasksTabProps) {
       })
       .then((fn) => (unlisten = fn))
       .catch(() => {});
-    return () => unlisten?.();
+    const relay = getRelayClient();
+    const unlistenRelay = relay.onDnsMonitorEvent((event) => {
+      if (event.runtimeStatus || event.lastCheckAt) {
+        setList((prev) => prev.map((task) => task.id === event.taskId
+          ? { ...task, runtimeStatus: event.runtimeStatus ?? task.runtimeStatus, lastSyncAt: event.lastCheckAt ?? task.lastSyncAt }
+          : task));
+      }
+    });
+    return () => {
+      unlisten?.();
+      unlistenRelay();
+    };
   }, [load]);
 
   const handleAdd = () => {
@@ -181,8 +280,11 @@ export function TasksTab({ user }: TasksTabProps) {
     setEditing({
       ...EMPTY_TASK,
       id: dnsFailoverService.genId(),
-      credentialId: CHMLFRP_CREDENTIAL_ID,
+      credentialId: cloudMode ? (credentials[0]?.id ?? "") : CHMLFRP_CREDENTIAL_ID,
       userToken: user.usertoken,
+      executionTarget: cloudMode
+        ? { type: "cloud", id: "xian-cloud" }
+        : { type: "device", id: localDeviceId ?? "local" },
     });
     // 打开对话框时加载隧道列表（仅首次加载，已加载则跳过）
     void ensureTunnelsLoaded();
@@ -219,6 +321,9 @@ export function TasksTab({ user }: TasksTabProps) {
       return toast.error("请选择主隧道");
     if (!editing.primaryTunnel.cnameValue.trim())
       return toast.error("主隧道缺少 CNAME 值");
+    if (editing.backupTunnels.length < 1)
+      return toast.error("至少配置一个备用隧道");
+    if (!editing.executionTarget) return toast.error("请选择执行位置");
     if (editing.failThreshold < 1) return toast.error("失败切换次数至少为 1");
     if (editing.recoverThreshold < 1) return toast.error("恢复回切次数至少为 1");
     if (editing.pollIntervalSecs < 10) return toast.error("轮询间隔至少为 10 秒");
@@ -253,8 +358,21 @@ export function TasksTab({ user }: TasksTabProps) {
         toast.error("未登录");
         return;
       }
-      await dnsFailoverService.saveTask(user.username, editing);
+      const isNew = !list.some((task) => task.id === editing.id);
+      if (cloudMode) {
+        if (isNew) {
+          await dnsFailoverCloudService.createTask({ ...editing, id: "" });
+        } else {
+          await dnsFailoverCloudService.saveTask(editing, editing.revision);
+        }
+      } else {
+        await dnsFailoverService.saveTask(user.username, editing);
+      }
       toast.success("任务已保存");
+      // DNS 容灾任务保存成功埋点：区分新建/编辑
+      if (user?.accessToken) {
+        reportUsage({ eventType: isNew ? "dns_task_create" : "dns_task_update", eventData: { provider: editing.credentialId ? "configured" : "unknown" } }).catch(() => {});
+      }
       setEditing(null);
       load();
     } catch (e) {
@@ -275,8 +393,16 @@ export function TasksTab({ user }: TasksTabProps) {
         toast.error("未登录");
         return;
       }
-      await dnsFailoverService.deleteTask(user.username, task.id);
+      if (cloudMode) {
+        await dnsFailoverCloudService.deleteTask(task.id);
+      } else {
+        await dnsFailoverService.deleteTask(user.username, task.id);
+      }
       toast.success("已删除");
+      // DNS 容灾任务删除成功埋点
+      if (user?.accessToken) {
+        reportUsage({ eventType: "dns_task_delete" }).catch(() => {});
+      }
       load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "删除失败");
@@ -289,10 +415,25 @@ export function TasksTab({ user }: TasksTabProps) {
         toast.error("未登录");
         return;
       }
-      await dnsFailoverService.saveTask(user.username, { ...task, enabled: !task.enabled });
-      // DNS 容灾监控启用埋点：仅在该任务原本停用、本次启用时上报（即触发监控），失败静默
-      if (!task.enabled && user?.accessToken) {
-        reportUsage({ eventType: "dns_monitor" }).catch(() => {});
+      if (cloudMode) {
+        if (task.enabled) {
+          await dnsFailoverCloudService.disableTask(task.id, task.revision ?? 0);
+        } else {
+          await dnsFailoverCloudService.enableTask(task.id, task.revision ?? 0);
+        }
+      } else {
+        await dnsFailoverService.saveTask(user.username, { ...task, enabled: !task.enabled });
+      }
+      // DNS 容灾监控启用/停用埋点：仅在用户已登录时上报，失败静默
+      if (user?.accessToken) {
+        if (!task.enabled) {
+          // 由停用切换为启用：兼容旧事件 dns_monitor + 新事件 dns_monitor_enable
+          reportUsage({ eventType: "dns_monitor" }).catch(() => {});
+          reportUsage({ eventType: "dns_monitor_enable" }).catch(() => {});
+        } else {
+          // 由启用切换为停用
+          reportUsage({ eventType: "dns_monitor_disable" }).catch(() => {});
+        }
       }
       load();
     } catch (e) {
@@ -304,7 +445,11 @@ export function TasksTab({ user }: TasksTabProps) {
   const handleCheckTask = async (task: DnsMonitorTask) => {
     setCheckingTaskIds((prev) => new Set(prev).add(task.id));
     try {
-      await dnsFailoverService.triggerCheckTask(task.id);
+      if (cloudMode) {
+        await dnsFailoverCloudService.checkTask(task.id);
+      } else {
+        await dnsFailoverService.triggerCheckTask(task.id);
+      }
       toast.success(`任务「${task.name}」检查完成`);
       load();
     } catch (e) {
@@ -321,17 +466,35 @@ export function TasksTab({ user }: TasksTabProps) {
   // 主隧道选择回调
   const handlePrimarySelect = (tunnelName: string, cnameValue: string) => {
     if (!editing) return;
+    const tunnel = tunnels.find((item) => item.name === tunnelName);
     setEditing({
       ...editing,
-      primaryTunnel: { ...editing.primaryTunnel, tunnelName, cnameValue },
+      primaryTunnel: {
+        ...editing.primaryTunnel,
+        id: tunnel ? String(tunnel.id) : editing.primaryTunnel.id,
+        tunnelName,
+        cnameValue,
+        nodeHost: tunnel?.node_ip ?? cnameValue,
+        nodePort: tunnel?.remote_port ?? tunnel?.server_port,
+      },
     });
   };
 
   // 备用隧道操作
   const handleBackupSelect = (idx: number, tunnelName: string, cnameValue: string) => {
     if (!editing) return;
+    const tunnel = tunnels.find((item) => item.name === tunnelName);
     const backups = editing.backupTunnels.map((b, i) =>
-      i === idx ? { ...b, tunnelName, cnameValue } : b,
+      i === idx
+        ? {
+            ...b,
+            id: tunnel ? String(tunnel.id) : b.id,
+            tunnelName,
+            cnameValue,
+            nodeHost: tunnel?.node_ip ?? cnameValue,
+            nodePort: tunnel?.remote_port ?? tunnel?.server_port,
+          }
+        : b,
     );
     setEditing({ ...editing, backupTunnels: backups });
   };
@@ -358,6 +521,11 @@ export function TasksTab({ user }: TasksTabProps) {
 
   return (
     <div className="space-y-4">
+      {syncWarning && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          云端同步暂不可用，当前使用本机数据：{syncWarning}
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold text-foreground">监控任务</h2>
@@ -397,6 +565,11 @@ export function TasksTab({ user }: TasksTabProps) {
             const rt = runtime[task.id];
             const isFailedOver = rt?.failedOver ?? false;
             const activeTunnel = rt?.activeTunnelName ?? task.primaryTunnel.tunnelName;
+            const target = executionTargets.find((item) =>
+              item.type === task.executionTarget?.type && item.id === task.executionTarget?.id,
+            );
+            const isCloud = task.executionTarget?.type === "cloud";
+            const executorOnline = task.executorOnline ?? target?.online ?? !cloudMode;
             return (
               <div
                 key={task.id}
@@ -427,6 +600,14 @@ export function TasksTab({ user }: TasksTabProps) {
                     </div>
                     <div className="text-xs text-muted-foreground mt-0.5">
                       {task.subdomain}.{task.domain}
+                    </div>
+                    <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      {isCloud ? <Cloud className="h-3 w-3" /> : <Monitor className="h-3 w-3" />}
+                      <span>{isCloud ? "云端" : (target?.name ?? "原当前客户端")}</span>
+                      <span className={executorOnline ? "text-emerald-500" : "text-amber-500"}>
+                        {executorOnline ? "运行中" : "执行端离线，已暂停"}
+                      </span>
+                      {task.lastSyncAt && <span>同步于 {task.lastSyncAt}</span>}
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
@@ -531,6 +712,46 @@ export function TasksTab({ user }: TasksTabProps) {
                     }
                   />
                 </div>
+              </div>
+
+              {/* DNS 服务商 */}
+              <div className="space-y-1.5">
+                <Label>执行位置</Label>
+                <Select
+                  options={[
+                    ...(cloudMode ? [{ value: "cloud:xian-cloud", label: "云端" }] : []),
+                    ...(!cloudMode && localDeviceId ? [{
+                      value: `device:${localDeviceId}`,
+                      label: "当前客户端 · 本地兼容模式",
+                    }] : []),
+                    ...executionTargets
+                      .filter((target) => target.type === "device" && target.online)
+                      .filter((target) => target.capabilities.includes("dns_failover_probe.v1"))
+                      .map((target) => ({
+                        value: `device:${target.id}`,
+                        label: `${target.name} · ${target.deviceType === "daemon" ? "服务主机" : "桌面客户端"}${target.osInfo ? ` · ${target.osInfo}` : ""}`,
+                      })),
+                    ...(editing.executionTarget?.type === "device" && !executionTargets.some((target) =>
+                      target.type === "device" && target.id === editing.executionTarget?.id && target.online,
+                    ) ? [{
+                      value: `device:${editing.executionTarget.id}`,
+                      label: "当前绑定主机（离线，任务将暂停）",
+                    }] : []),
+                  ]}
+                  value={`${editing.executionTarget?.type ?? "cloud"}:${editing.executionTarget?.id ?? "xian-cloud"}`}
+                  onChange={(value) => {
+                    const [type, id] = String(value).split(":", 2);
+                    setEditing({
+                      ...editing,
+                      executionTarget: type === "cloud"
+                        ? { type: "cloud", id: "xian-cloud" }
+                        : { type: "device", id },
+                    });
+                  }}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  任务只在选定位置执行。指定主机离线时暂停，不会自动转移到其他位置。
+                </p>
               </div>
 
               {/* DNS 服务商 */}

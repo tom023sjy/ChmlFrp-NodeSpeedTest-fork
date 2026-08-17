@@ -10,13 +10,13 @@
 //! - `relay_speedtest`：HTTP 带宽测试（下载/上传，进度推送）
 //! - `relay_delete_my_data`：桌面端不支持，返回 NOT_SUPPORTED
 
-use std::net::{TcpStream, ToSocketAddrs, IpAddr};
+use log::{info, warn};
+use regex::Regex;
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use log::{info, warn};
-use regex::Regex;
 use tauri::Emitter;
 
 // ===== 结果结构（与 API 需求文档 6.1-6.4 对齐，camelCase 序列化）=====
@@ -146,12 +146,24 @@ fn run_ping(host: &str, count: u32) -> (Vec<f64>, u32) {
 
 fn build_ping_stat(rtts: Vec<f64>, loss: u32) -> PingStat {
     if rtts.is_empty() {
-        return PingStat { rtts: vec![], min: None, avg: None, max: None, loss };
+        return PingStat {
+            rtts: vec![],
+            min: None,
+            avg: None,
+            max: None,
+            loss,
+        };
     }
     let min = rtts.iter().cloned().fold(f64::INFINITY, f64::min);
     let max = rtts.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let avg = rtts.iter().sum::<f64>() / rtts.len() as f64;
-    PingStat { rtts, min: Some(min), avg: Some(avg), max: Some(max), loss }
+    PingStat {
+        rtts,
+        min: Some(min),
+        avg: Some(avg),
+        max: Some(max),
+        loss,
+    }
 }
 
 #[tauri::command]
@@ -163,26 +175,26 @@ pub async fn relay_dispatch_rpc(
     info!("[relay] dispatch_rpc: command={}", command);
     match command.as_str() {
         "ping" => {
-            let p: PingParams = serde_json::from_value(params)
-                .map_err(|e| format!("参数解析失败: {}", e))?;
+            let p: PingParams =
+                serde_json::from_value(params).map_err(|e| format!("参数解析失败: {}", e))?;
             let result = relay_ping_inner(p.host, p.count).await?;
             serde_json::to_value(result).map_err(|e| format!("序列化失败: {}", e))
         }
         "tcping" => {
-            let p: TcpingParams = serde_json::from_value(params)
-                .map_err(|e| format!("参数解析失败: {}", e))?;
+            let p: TcpingParams =
+                serde_json::from_value(params).map_err(|e| format!("参数解析失败: {}", e))?;
             let result = relay_tcping_inner(p.host, p.port, p.count, p.timeout_secs).await?;
             serde_json::to_value(result).map_err(|e| format!("序列化失败: {}", e))
         }
         "node_latency" => {
-            let p: NodeLatencyParams = serde_json::from_value(params)
-                .map_err(|e| format!("参数解析失败: {}", e))?;
+            let p: NodeLatencyParams =
+                serde_json::from_value(params).map_err(|e| format!("参数解析失败: {}", e))?;
             let result = relay_node_latency_inner(p.node, p.port, p.count).await?;
             serde_json::to_value(result).map_err(|e| format!("序列化失败: {}", e))
         }
         "speedtest" => {
-            let p: SpeedtestParams = serde_json::from_value(params)
-                .map_err(|e| format!("参数解析失败: {}", e))?;
+            let p: SpeedtestParams =
+                serde_json::from_value(params).map_err(|e| format!("参数解析失败: {}", e))?;
             let result = relay_speedtest_inner(
                 app_handle,
                 p.request_id,
@@ -194,9 +206,7 @@ pub async fn relay_dispatch_rpc(
             .await?;
             serde_json::to_value(result).map_err(|e| format!("序列化失败: {}", e))
         }
-        "delete_my_data" => {
-            Err("NOT_SUPPORTED: 桌面客户端不支持删除设备数据".to_string())
-        }
+        "delete_my_data" => Err("NOT_SUPPORTED: 桌面客户端不支持删除设备数据".to_string()),
         other => Err(format!("未知命令: {}", other)),
     }
 }
@@ -329,7 +339,10 @@ async fn relay_node_latency_inner(
         .await
         .map_err(|e| format!("tcping join error: {}", e))?;
 
-    Ok(NodeLatencyResult { ping: ping_stat, tcping: tcping_stat })
+    Ok(NodeLatencyResult {
+        ping: ping_stat,
+        tcping: tcping_stat,
+    })
 }
 
 // ===== speedtest 带宽测试 =====
@@ -359,7 +372,10 @@ fn validate_speedtest_url(url: &str) -> Result<(), String> {
     // 如果是 IP 字面量，直接校验
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_blocked_ip(&ip) {
-            return Err(format!("目标地址 {} 不允许访问（内网/回环/链路本地地址）", ip));
+            return Err(format!(
+                "目标地址 {} 不允许访问（内网/回环/链路本地地址）",
+                ip
+            ));
         }
         return Ok(());
     }
@@ -367,13 +383,17 @@ fn validate_speedtest_url(url: &str) -> Result<(), String> {
     // 域名：解析后检查所有 IP 地址
     let port = parsed.port_or_known_default().unwrap_or(80);
     let addr_str = format!("{}:{}", host, port);
-    let addrs = addr_str.to_socket_addrs()
+    let addrs = addr_str
+        .to_socket_addrs()
         .map_err(|e| format!("域名解析失败: {}", e))?;
 
     for addr in addrs {
         let ip = addr.ip();
         if is_blocked_ip(&ip) {
-            return Err(format!("域名 {} 解析到禁止地址 {}（内网/回环/链路本地）", host, ip));
+            return Err(format!(
+                "域名 {} 解析到禁止地址 {}（内网/回环/链路本地）",
+                host, ip
+            ));
         }
     }
 
@@ -388,13 +408,13 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
                 || v4.is_private()      // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 || v4.is_link_local()   // 169.254.0.0/16（含云元数据 169.254.169.254）
                 || v4.is_unspecified()  // 0.0.0.0
-                || v4.is_broadcast()    // 255.255.255.255
+                || v4.is_broadcast() // 255.255.255.255
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()           // ::1
                 || v6.is_unspecified()  // ::
                 || (v6.segments()[0] & 0xfe00) == 0xfc00  // ULA fc00::/7
-                || (v6.segments()[0] & 0xffc0) == 0xfe80  // 链路本地 fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // 链路本地 fe80::/10
         }
     }
 }
@@ -438,27 +458,42 @@ async fn relay_speedtest_inner(
 
     let result = match direction.as_str() {
         "download" | "both" => {
-            run_download_speedtest(app_handle.clone(), &request_id, &url, duration_secs, cancel_flag.clone()).await
+            run_download_speedtest(
+                app_handle.clone(),
+                &request_id,
+                &url,
+                duration_secs,
+                cancel_flag.clone(),
+            )
+            .await
         }
         "upload" => {
-            run_upload_speedtest(app_handle.clone(), &request_id, &url, duration_secs, cancel_flag.clone()).await
+            run_upload_speedtest(
+                app_handle.clone(),
+                &request_id,
+                &url,
+                duration_secs,
+                cancel_flag.clone(),
+            )
+            .await
         }
-        _ => Err(format!("不支持的方向: {}（可选 download/upload/both）", direction)),
+        _ => Err(format!(
+            "不支持的方向: {}（可选 download/upload/both）",
+            direction
+        )),
     };
 
     timeout_handle.abort();
 
     match result {
-        Ok((download_mbps, upload_mbps)) => {
-            Ok(SpeedtestResult {
-                success: true,
-                download_speed_mbps: download_mbps,
-                upload_speed_mbps: upload_mbps,
-                latency_ms: None,
-                jitter_ms: None,
-                error: None,
-            })
-        }
+        Ok((download_mbps, upload_mbps)) => Ok(SpeedtestResult {
+            success: true,
+            download_speed_mbps: download_mbps,
+            upload_speed_mbps: upload_mbps,
+            latency_ms: None,
+            jitter_ms: None,
+            error: None,
+        }),
         Err(e) => {
             warn!("[relay] speedtest 失败: {}", e);
             Ok(SpeedtestResult {
@@ -544,7 +579,13 @@ async fn run_download_speedtest(
                         0.0
                     };
                     let progress = 5.0 + (elapsed_secs / duration_secs as f64) * 90.0;
-                    emit_progress(&app_handle, request_id, progress.min(95.0), "downloading", speed);
+                    emit_progress(
+                        &app_handle,
+                        request_id,
+                        progress.min(95.0),
+                        "downloading",
+                        speed,
+                    );
                 }
                 if Instant::now() >= deadline {
                     break;
@@ -628,7 +669,13 @@ async fn run_upload_speedtest(
                 0.0
             };
             let progress = 5.0 + (elapsed_secs / duration_secs as f64) * 90.0;
-            emit_progress(&app_handle, &request_id, progress.min(95.0), "uploading", speed);
+            emit_progress(
+                &app_handle,
+                &request_id,
+                progress.min(95.0),
+                "uploading",
+                speed,
+            );
 
             // 短暂让出控制权，避免阻塞
             tokio::time::sleep(Duration::from_millis(10)).await;

@@ -4,7 +4,9 @@
 // 主隧道连续 2 次失败 → 切换到备用隧道（按优先级）
 // 主隧道恢复连续 2 次 → 回切到主隧道
 // CNAME 值取所选隧道的 ip 字段
-use super::dns_config::{self, DnsRuntimeState, DnsSwitchLog, DnsMonitorTask, TaskRuntime, TunnelTarget, UserTokenState};
+use super::dns_config::{
+    self, DnsMonitorTask, DnsRuntimeState, DnsSwitchLog, TaskRuntime, TunnelTarget, UserTokenState,
+};
 use super::dns_provider::{self, DnsCredential, DnsProviderKind};
 use chrono::{Local, Utc};
 use serde::{Deserialize, Deserializer};
@@ -61,7 +63,12 @@ struct TunnelInfo {
     #[serde(default)]
     ip: String,
     /// API 返回的隧道状态字段，可能是 state / tunnelState / tunnel_state，值为字符串 "true"/"false"
-    #[serde(default, alias = "state", alias = "tunnelState", deserialize_with = "deserialize_tunnel_state")]
+    #[serde(
+        default,
+        alias = "state",
+        alias = "tunnelState",
+        deserialize_with = "deserialize_tunnel_state"
+    )]
     tunnel_state: Option<bool>,
     /// 隧道远程端口，tcping 检测时使用
     #[serde(default, alias = "remotePort")]
@@ -89,8 +96,12 @@ impl DnsMonitorHandle {
 pub fn start_monitor(app_handle: tauri::AppHandle) {
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
-        log::info!("[DNS-Monitor] 容灾监控调度器启动，基础 tick {}s", SCHEDULER_TICK_SECS);
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(SCHEDULER_TICK_SECS));
+        log::info!(
+            "[DNS-Monitor] 容灾监控调度器启动，基础 tick {}s",
+            SCHEDULER_TICK_SECS
+        );
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(SCHEDULER_TICK_SECS));
         // 跳过首次立即触发，等下个 tick
         interval.tick().await;
         loop {
@@ -124,23 +135,28 @@ async fn run_once(app_handle: &tauri::AppHandle) -> Result<(), String> {
         }
 
         // 拉取隧道列表（按 token 缓存，失败也缓存错误信息）
-        let (tunnels, fetch_error): (Vec<TunnelInfo>, Option<String>) = if let Some(t) = cache.get(&task.user_token) {
-            (t.clone(), None)
-        } else if let Some(err) = error_cache.get(&task.user_token) {
-            (Vec::new(), Some(err.clone()))
-        } else {
-            match fetch_tunnels(app_handle, &task.user_token).await {
-                Ok(fetched) => {
-                    cache.insert(task.user_token.clone(), fetched.clone());
-                    (fetched, None)
+        let (tunnels, fetch_error): (Vec<TunnelInfo>, Option<String>) =
+            if let Some(t) = cache.get(&task.user_token) {
+                (t.clone(), None)
+            } else if let Some(err) = error_cache.get(&task.user_token) {
+                (Vec::new(), Some(err.clone()))
+            } else {
+                match fetch_tunnels(app_handle, &task.user_token).await {
+                    Ok(fetched) => {
+                        cache.insert(task.user_token.clone(), fetched.clone());
+                        (fetched, None)
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[DNS-Monitor] 任务「{}」: 获取隧道列表失败: {}",
+                            task.name,
+                            e
+                        );
+                        error_cache.insert(task.user_token.clone(), e.clone());
+                        (Vec::new(), Some(e))
+                    }
                 }
-                Err(e) => {
-                    log::warn!("[DNS-Monitor] 任务「{}」: 获取隧道列表失败: {}", task.name, e);
-                    error_cache.insert(task.user_token.clone(), e.clone());
-                    (Vec::new(), Some(e))
-                }
-            }
-        };
+            };
 
         // 执行单任务检查（传入可能的错误信息，确保 last_check/last_result 更新）
         check_single_task(app_handle, task, &tunnels, fetch_error.as_deref()).await?;
@@ -171,17 +187,26 @@ async fn check_single_task(
         log::warn!("[DNS-Monitor] 任务「{}」: 获取隧道失败: {}", task.name, err);
         rt.last_result = format!("获取隧道失败: {}", err);
         save_runtime(app_handle, &task.id, &rt);
-        let _ = app_handle.emit("dns-monitor-event", serde_json::json!({
-            "taskId": task.id,
-            "runtime": rt,
-        }));
+        let _ = app_handle.emit(
+            "dns-monitor-event",
+            serde_json::json!({
+                "taskId": task.id,
+                "runtime": rt,
+            }),
+        );
         return Ok(());
     }
 
     // 判定主隧道状态（按任务配置的检测方式）
     let primary = find_tunnel(tunnels, &task.primary_tunnel.tunnel_name);
     let primary_ok = if let Some(t) = primary {
-        is_tunnel_healthy(t, &task.check_methods, task.fail_method_threshold, task.tcping_timeout_secs).await
+        is_tunnel_healthy(
+            t,
+            &task.check_methods,
+            task.fail_method_threshold,
+            task.tcping_timeout_secs,
+        )
+        .await
     } else {
         false
     };
@@ -194,10 +219,13 @@ async fn check_single_task(
         );
         rt.last_result = "隧道列表为空，等待有效 token".to_string();
         save_runtime(app_handle, &task.id, &rt);
-        let _ = app_handle.emit("dns-monitor-event", serde_json::json!({
-            "taskId": task.id,
-            "runtime": rt,
-        }));
+        let _ = app_handle.emit(
+            "dns-monitor-event",
+            serde_json::json!({
+                "taskId": task.id,
+                "runtime": rt,
+            }),
+        );
         return Ok(());
     }
 
@@ -222,7 +250,8 @@ async fn check_single_task(
             &task.check_methods,
             task.fail_method_threshold,
             task.tcping_timeout_secs,
-        ).await;
+        )
+        .await;
         let backup_total = task.backup_tunnels.len();
         let backup_note = if backup_total > 0 {
             format!("，备用 {}/{} 可用", backup_healthy, backup_total)
@@ -236,7 +265,10 @@ async fn check_single_task(
             rt.last_result = format!("主隧道正常{}", backup_note);
         } else {
             rt.primary_fail_count += 1;
-            rt.last_result = format!("主隧道异常 ({}/{}){}", rt.primary_fail_count, task.fail_threshold, backup_note);
+            rt.last_result = format!(
+                "主隧道异常 ({}/{}){}",
+                rt.primary_fail_count, task.fail_threshold, backup_note
+            );
             if rt.primary_fail_count >= task.fail_threshold {
                 // 触发切换：打印详细调试日志
                 log::warn!(
@@ -247,7 +279,10 @@ async fn check_single_task(
                 );
                 log::info!(
                     "[DNS-Monitor] 备用隧道配置: {:?}",
-                    task.backup_tunnels.iter().map(|b| &b.tunnel_name).collect::<Vec<_>>()
+                    task.backup_tunnels
+                        .iter()
+                        .map(|b| &b.tunnel_name)
+                        .collect::<Vec<_>>()
                 );
                 log::info!(
                     "[DNS-Monitor] API 返回的隧道名称: {:?}",
@@ -261,7 +296,8 @@ async fn check_single_task(
                             &task.check_methods,
                             task.fail_method_threshold,
                             task.tcping_timeout_secs,
-                        ).await;
+                        )
+                        .await;
                         log::info!(
                             "[DNS-Monitor] 备用「{}」: 已匹配, tunnel_state={:?}, nodestate={}, 健康={}",
                             t.name,
@@ -282,21 +318,37 @@ async fn check_single_task(
                     &task.check_methods,
                     task.fail_method_threshold,
                     task.tcping_timeout_secs,
-                ).await {
-                    log::info!("[DNS-Monitor] pick_backup_tunnel 选中: {}", backup.tunnel_name);
+                )
+                .await
+                {
+                    log::info!(
+                        "[DNS-Monitor] pick_backup_tunnel 选中: {}",
+                        backup.tunnel_name
+                    );
                     let cname_value = backup.cname_value.clone();
                     let to_name = backup.tunnel_name.clone();
                     let from_name = rt.active_tunnel_name.clone();
-                    let (success, message) = match do_switch(app_handle, task, &from_name, &to_name, &cname_value).await {
-                        Ok(_) => {
-                            rt.active_tunnel_name = to_name.clone();
-                            rt.failed_over = true;
-                            rt.primary_success_count = 0;
-                            (true, "切换成功".to_string())
-                        }
-                        Err(e) => (false, e),
-                    };
-                    write_log(app_handle, task, "failover", &from_name, &to_name, &cname_value, success, &message);
+                    let (success, message) =
+                        match do_switch(app_handle, task, &from_name, &to_name, &cname_value).await
+                        {
+                            Ok(_) => {
+                                rt.active_tunnel_name = to_name.clone();
+                                rt.failed_over = true;
+                                rt.primary_success_count = 0;
+                                (true, "切换成功".to_string())
+                            }
+                            Err(e) => (false, e),
+                        };
+                    write_log(
+                        app_handle,
+                        task,
+                        "failover",
+                        &from_name,
+                        &to_name,
+                        &cname_value,
+                        success,
+                        &message,
+                    );
                 } else {
                     log::error!("[DNS-Monitor] pick_backup_tunnel 返回 None！所有备用隧道都不可用");
                     rt.last_result = "无可用备用隧道".to_string();
@@ -307,21 +359,34 @@ async fn check_single_task(
         // 当前为备用隧道：等待主隧道恢复后回切
         if primary_ok {
             rt.primary_success_count += 1;
-            rt.last_result = format!("主隧道恢复中 ({}/{})", rt.primary_success_count, task.recover_threshold);
+            rt.last_result = format!(
+                "主隧道恢复中 ({}/{})",
+                rt.primary_success_count, task.recover_threshold
+            );
             if rt.primary_success_count >= task.recover_threshold {
                 let to_name = task.primary_tunnel.tunnel_name.clone();
                 let cname_value = task.primary_tunnel.cname_value.clone();
                 let from_name = rt.active_tunnel_name.clone();
-                let (success, message) = match do_switch(app_handle, task, &from_name, &to_name, &cname_value).await {
-                    Ok(_) => {
-                        rt.active_tunnel_name = to_name.clone();
-                        rt.failed_over = false;
-                        rt.primary_fail_count = 0;
-                        (true, "回切成功".to_string())
-                    }
-                    Err(e) => (false, e),
-                };
-                write_log(app_handle, task, "recover", &from_name, &to_name, &cname_value, success, &message);
+                let (success, message) =
+                    match do_switch(app_handle, task, &from_name, &to_name, &cname_value).await {
+                        Ok(_) => {
+                            rt.active_tunnel_name = to_name.clone();
+                            rt.failed_over = false;
+                            rt.primary_fail_count = 0;
+                            (true, "回切成功".to_string())
+                        }
+                        Err(e) => (false, e),
+                    };
+                write_log(
+                    app_handle,
+                    task,
+                    "recover",
+                    &from_name,
+                    &to_name,
+                    &cname_value,
+                    success,
+                    &message,
+                );
             }
         } else {
             rt.primary_success_count = 0;
@@ -332,14 +397,20 @@ async fn check_single_task(
     // 写回运行时
     save_runtime(app_handle, &task.id, &rt);
     // 推送前端事件
-    let _ = app_handle.emit("dns-monitor-event", serde_json::json!({
-        "taskId": task.id,
-        "runtime": rt,
-    }));
+    let _ = app_handle.emit(
+        "dns-monitor-event",
+        serde_json::json!({
+            "taskId": task.id,
+            "runtime": rt,
+        }),
+    );
     Ok(())
 }
 
-async fn fetch_tunnels(app_handle: &tauri::AppHandle, user_token: &str) -> Result<Vec<TunnelInfo>, String> {
+async fn fetch_tunnels(
+    app_handle: &tauri::AppHandle,
+    user_token: &str,
+) -> Result<Vec<TunnelInfo>, String> {
     // 优先使用前端推送的 accessToken（OAuth token），其次回退到任务里存的 user_token
     let (effective_token, token_source): (String, &'static str) = {
         if let Some(state) = app_handle.try_state::<UserTokenState>() {
@@ -387,7 +458,9 @@ async fn fetch_tunnels(app_handle: &tauri::AppHandle, user_token: &str) -> Resul
         data: Vec<TunnelInfo>,
     }
 
-    let parsed: TunnelApiResponse = resp.json().await
+    let parsed: TunnelApiResponse = resp
+        .json()
+        .await
         .map_err(|e| format!("解析隧道响应失败: {}", e))?;
 
     log::info!("[DNS-Monitor] 获取到 {} 条隧道", parsed.data.len());
@@ -425,24 +498,41 @@ async fn is_tunnel_healthy(
         let (passed, detail) = match m.as_str() {
             "tunnel_state" => {
                 let ok = t.tunnel_state != Some(false);
-                (ok, format!("tunnel_state={:?}→{}", t.tunnel_state, if ok { "通过" } else { "不通过" }))
+                (
+                    ok,
+                    format!(
+                        "tunnel_state={:?}→{}",
+                        t.tunnel_state,
+                        if ok { "通过" } else { "不通过" }
+                    ),
+                )
             }
             "node_state" => {
                 let ok = !t.nodestate.eq_ignore_ascii_case("offline");
-                (ok, format!("nodestate={}→{}", t.nodestate, if ok { "通过" } else { "不通过" }))
+                (
+                    ok,
+                    format!(
+                        "nodestate={}→{}",
+                        t.nodestate,
+                        if ok { "通过" } else { "不通过" }
+                    ),
+                )
             }
             "tcping" => {
                 let target = format!("{}:{}", t.ip, t.remote_port);
                 if t.ip.is_empty() || t.remote_port == 0 {
                     (false, format!("tcping {}→不通过（地址无效）", target))
                 } else {
-                    let timeout = std::time::Duration::from_secs(tcping_timeout_secs.max(1).min(10) as u64);
-                    let result = tokio::time::timeout(
-                        timeout,
-                        tokio::net::TcpStream::connect(&target),
-                    ).await;
+                    let timeout =
+                        std::time::Duration::from_secs(tcping_timeout_secs.max(1).min(10) as u64);
+                    let result =
+                        tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&target))
+                            .await;
                     let ok = matches!(result, Ok(Ok(_)));
-                    (ok, format!("tcping {}→{}", target, if ok { "通过" } else { "不通过" }))
+                    (
+                        ok,
+                        format!("tcping {}→{}", target, if ok { "通过" } else { "不通过" }),
+                    )
                 }
             }
             _ => (true, format!("未知检测方式{}→跳过", m)),
@@ -457,7 +547,10 @@ async fn is_tunnel_healthy(
     if !healthy {
         log::info!(
             "[DNS-Monitor] 隧道「{}」不健康: 不通过 {}/{}，详情: {}",
-            t.name, fail_count, methods.len(), details.join("，")
+            t.name,
+            fail_count,
+            methods.len(),
+            details.join("，")
         );
     }
     healthy
@@ -473,7 +566,8 @@ async fn pick_backup_tunnel<'a>(
 ) -> Option<&'a TunnelTarget> {
     for b in backups {
         if let Some(t) = find_tunnel(tunnels, &b.tunnel_name) {
-            if is_tunnel_healthy(t, check_methods, fail_method_threshold, tcping_timeout_secs).await {
+            if is_tunnel_healthy(t, check_methods, fail_method_threshold, tcping_timeout_secs).await
+            {
                 return Some(b);
             }
         }
@@ -492,7 +586,8 @@ async fn count_healthy_backups(
     let mut count = 0;
     for b in backups {
         if let Some(t) = find_tunnel(tunnels, &b.tunnel_name) {
-            if is_tunnel_healthy(t, check_methods, fail_method_threshold, tcping_timeout_secs).await {
+            if is_tunnel_healthy(t, check_methods, fail_method_threshold, tcping_timeout_secs).await
+            {
                 count += 1;
             }
         }
@@ -513,7 +608,12 @@ async fn do_switch(
     dns_provider::upsert_cname(&credential, &task.domain, &task.subdomain, cname_value).await?;
     log::info!(
         "[DNS-Monitor] 任务 {} 切换 CNAME {}.{} -> {}（隧道: {} -> {}）",
-        task.name, task.subdomain, task.domain, cname_value, from_tunnel, to_tunnel
+        task.name,
+        task.subdomain,
+        task.domain,
+        cname_value,
+        from_tunnel,
+        to_tunnel
     );
     Ok(())
 }
@@ -529,15 +629,14 @@ fn find_credential(
     }
     let list: Vec<DnsCredential> = dns_config::list_all_credentials(app_handle).unwrap_or_default();
     list.into_iter()
-        .find(|c| {
-            c.id == id
-                && (c.owner_username.is_empty() || c.owner_username == owner_username)
-        })
+        .find(|c| c.id == id && (c.owner_username.is_empty() || c.owner_username == owner_username))
         .ok_or_else(|| format!("未找到凭证: {}", id))
 }
 
 /// 从 UserTokenState 取 accessToken 构造 ChmlFrp 临时凭证
-fn build_chmlfrp_credential_from_user_token(app_handle: &tauri::AppHandle) -> Result<DnsCredential, String> {
+fn build_chmlfrp_credential_from_user_token(
+    app_handle: &tauri::AppHandle,
+) -> Result<DnsCredential, String> {
     let state = app_handle
         .try_state::<UserTokenState>()
         .ok_or_else(|| "未找到用户登录状态".to_string())?;
@@ -560,7 +659,11 @@ fn build_chmlfrp_credential_from_user_token(app_handle: &tauri::AppHandle) -> Re
     })
 }
 
-fn get_runtime(app_handle: &tauri::AppHandle, task_id: &str, primary: &TunnelTarget) -> TaskRuntime {
+fn get_runtime(
+    app_handle: &tauri::AppHandle,
+    task_id: &str,
+    primary: &TunnelTarget,
+) -> TaskRuntime {
     if let Some(state) = app_handle.try_state::<DnsRuntimeState>() {
         if let Ok(guard) = state.0.lock() {
             if let Some(rt) = guard.get(task_id) {

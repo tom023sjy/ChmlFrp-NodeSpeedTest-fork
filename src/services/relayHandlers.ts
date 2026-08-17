@@ -19,6 +19,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DeviceRelayClient, RpcContext } from "./deviceRelay";
+import type { TempTunnelInfo } from "./tunnelService";
+import type { SpeedSample } from "./speedSamples";
 
 // ===== 命令参数/返回类型（与 API 需求文档 6.1-6.5 对齐）=====
 
@@ -80,9 +82,10 @@ export interface SpeedtestResult {
 export interface TcpSpeedTestParams {
   host: string;
   port: number;
-  sizeMb?: number;
+  durationSeconds: number;
   connectTimeoutSecs?: number;
   readTimeoutSecs?: number;
+  runId?: string;
 }
 
 export interface TcpSpeedTestResult {
@@ -90,6 +93,7 @@ export interface TcpSpeedTestResult {
   speedMbps: number;
   totalBytes: number;
   durationMs: number;
+  speedSamples: SpeedSample[];
   error: string | null;
 }
 
@@ -100,6 +104,38 @@ interface SpeedtestProgressEvent {
   progress: number;
   stage: string;
   speedMbps: number;
+}
+
+interface DnsProbeMethodResult {
+  passed: boolean;
+  durationMs: number;
+  errorCode: string | null;
+}
+
+export interface TunnelLatencyResult {
+  success: boolean;
+  avgMs: number;
+  jitterMs: number;
+  lossPercent: number;
+  sent: number;
+  received: number;
+  rtts: Array<number | null>;
+  error: string | null;
+}
+
+interface DnsProbeTunnel {
+  id: string;
+  nodeHost: string;
+  nodePort: number;
+  tunnelState?: boolean;
+  nodeState?: boolean;
+}
+
+interface DnsFailoverProbeParams {
+  executionId: string;
+  methods: string[];
+  tunnels: DnsProbeTunnel[];
+  timeoutMs?: number;
 }
 
 /**
@@ -151,21 +187,24 @@ export function registerRelayHandlers(relay: DeviceRelayClient): () => void {
       console.warn("[relayHandlers] 监听 speedtest 进度事件失败:", err);
     });
 
-  relay.registerCommand("speedtest", async (params: unknown, context: RpcContext) => {
-    const p = params as SpeedtestParams;
-    // 将 requestId 注入 params 传给 Rust 端
-    const paramsWithRequestId = {
-      requestId: context.requestId,
-      url: p.url,
-      direction: p.direction,
-      durationSecs: p.durationSecs,
-      threads: p.threads,
-    };
-    return await invoke<SpeedtestResult>("relay_dispatch_rpc", {
-      command: "speedtest",
-      params: paramsWithRequestId,
-    });
-  });
+  relay.registerCommand(
+    "speedtest",
+    async (params: unknown, context: RpcContext) => {
+      const p = params as SpeedtestParams;
+      // 将 requestId 注入 params 传给 Rust 端
+      const paramsWithRequestId = {
+        requestId: context.requestId,
+        url: p.url,
+        direction: p.direction,
+        durationSecs: p.durationSecs,
+        threads: p.threads,
+      };
+      return await invoke<SpeedtestResult>("relay_dispatch_rpc", {
+        command: "speedtest",
+        params: paramsWithRequestId,
+      });
+    },
+  );
 
   // ===== tcp_speed_test（端对端 TCP 测速，桌面端作为被测端时执行）=====
   relay.registerCommand("tcp_speed_test", async (params: unknown) => {
@@ -173,76 +212,196 @@ export function registerRelayHandlers(relay: DeviceRelayClient): () => void {
     return await invoke<TcpSpeedTestResult>("tcp_speed_test", {
       host: p.host,
       port: p.port,
-      sizeMb: p.sizeMb,
+      durationSeconds: p.durationSeconds,
+      runId: p.runId,
+    });
+  });
+
+  relay.registerCommand("dns_failover_probe_v1", async (params: unknown) => {
+    const request = params as DnsFailoverProbeParams;
+    if (
+      !request.executionId ||
+      !Array.isArray(request.methods) ||
+      !Array.isArray(request.tunnels)
+    ) {
+      throw new Error("DNS 容灾探测参数无效");
+    }
+    const results = await Promise.all(
+      request.tunnels.map(async (tunnel) => {
+        const methods: Record<string, DnsProbeMethodResult> = {};
+        for (const method of request.methods) {
+          const startedAt = Date.now();
+          if (method === "tunnel_state" || method === "node_state") {
+            const value =
+              method === "tunnel_state" ? tunnel.tunnelState : tunnel.nodeState;
+            methods[method] = {
+              passed: value === true,
+              durationMs: Date.now() - startedAt,
+              errorCode: typeof value === "boolean" ? null : "UNAVAILABLE",
+            };
+            continue;
+          }
+          if (method === "tcping") {
+            try {
+              const response = await invoke<TcpingResult>(
+                "relay_dispatch_rpc",
+                {
+                  command: "tcping",
+                  params: {
+                    host: tunnel.nodeHost,
+                    port: tunnel.nodePort,
+                    count: 1,
+                    timeoutSecs: Math.max(
+                      1,
+                      Math.ceil((request.timeoutMs ?? 15000) / 1000),
+                    ),
+                  },
+                },
+              );
+              methods[method] = {
+                passed: response.loss === 0,
+                durationMs: Date.now() - startedAt,
+                errorCode: response.loss === 0 ? null : "TIMEOUT",
+              };
+            } catch {
+              methods[method] = {
+                passed: false,
+                durationMs: Date.now() - startedAt,
+                errorCode: "EXEC_FAILED",
+              };
+            }
+            continue;
+          }
+          methods[method] = {
+            passed: false,
+            durationMs: 0,
+            errorCode: "UNSUPPORTED_METHOD",
+          };
+        }
+        return { tunnelId: tunnel.id, methods };
+      }),
+    );
+    return { executionId: request.executionId, results };
+  });
+
+  relay.registerCommand("tunnel_latency_test", async (params: unknown) => {
+    const p = params as {
+      host: string;
+      port: number;
+      count?: number;
+      timeoutMs?: number;
+      runId?: string;
+    };
+    return await invoke<TunnelLatencyResult>("tunnel_latency_test", {
+      host: p.host,
+      port: p.port,
+      count: p.count,
+      timeoutMs: p.timeoutMs,
+      runId: p.runId,
     });
   });
 
   // ===== e2e_setup / e2e_cleanup（端对端测试：本机作为服务端时创建/清理隧道）=====
   // 当其他桌面端发起「本机 → 对端」方向测试时，通过 relay 调用本机的 e2e_setup
   // 让本机创建临时隧道+测速服务端，返回隧道地址供对端测速
-  relay.registerCommand("e2e_setup", async (params: unknown) => {
-    const { tunnelService } = await import("./tunnelService");
-    const { getStoredUser } = await import("./api");
-    const p = params as { nodeName: string };
+  relay.registerCommand(
+    "e2e_setup",
+    async (params: unknown, context: RpcContext) => {
+      const { tunnelService } = await import("./tunnelService");
+      const { getStoredUser } = await import("./api");
+      const p = params as { nodeName: string };
 
-    // 启动 TCP 测速服务端
-    await invoke("stop_tcp_speed_server");
-    const tcpServerPort = await invoke<number>("start_tcp_speed_server");
-    const serverOk = await invoke<boolean>("check_tcp_speed_server", { port: tcpServerPort });
-    if (!serverOk) {
-      throw new Error("TCP 测速服务端自检失败");
-    }
-
-    // 创建临时隧道
-    const tunnelInfo = await tunnelService.createTempTunnel(tcpServerPort, p.nodeName);
-
-    // 启动 frpc
-    const user = getStoredUser();
-    if (!user) throw new Error("请先登录");
-
-    await invoke("start_frpc", {
-      config: {
-        server_addr: tunnelInfo.nodeIp,
-        server_port: tunnelInfo.serverPort,
-        user: user.usertoken,
-        token: tunnelInfo.nodeToken,
-        local_ip: "127.0.0.1",
-        local_port: tunnelInfo.localPort,
-        remote_port: tunnelInfo.remotePort,
-        tunnel_name: tunnelInfo.tunnelName,
-      },
-    });
-
-    // 等待 frpc 连接建立
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
-    // 将隧道信息存到全局，供 e2e_cleanup 使用
-    (globalThis as Record<string, unknown>).__e2eTunnelInfo = tunnelInfo;
-    (globalThis as Record<string, unknown>).__e2eFrpcStarted = true;
-
-    return {
-      nodeIp: tunnelInfo.nodeIp,
-      remotePort: tunnelInfo.remotePort,
-    };
-  });
+      let tunnelInfo: TempTunnelInfo | null = null;
+      let frpcStarted = false;
+      try {
+        await invoke("stop_tcp_speed_server");
+        const tcpServerPort = await invoke<number>("start_tcp_speed_server");
+        const serverOk = await invoke<boolean>("check_tcp_speed_server", {
+          port: tcpServerPort,
+        });
+        if (!serverOk) throw new Error("TCP 测速服务端自检失败");
+        tunnelInfo = await tunnelService.createTempTunnel(
+          tcpServerPort,
+          p.nodeName,
+        );
+        if (context.signal.aborted) throw context.signal.reason;
+        const user = getStoredUser();
+        if (!user) throw new Error("请先登录");
+        await invoke("start_frpc", {
+          config: {
+            server_addr: tunnelInfo.nodeIp,
+            server_port: tunnelInfo.serverPort,
+            user: user.usertoken,
+            token: tunnelInfo.nodeToken,
+            local_ip: "127.0.0.1",
+            local_port: tunnelInfo.localPort,
+            remote_port: tunnelInfo.remotePort,
+            tunnel_name: tunnelInfo.tunnelName,
+          },
+        });
+        frpcStarted = true;
+        if (context.signal.aborted) throw context.signal.reason;
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 3000);
+          context.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(context.signal.reason);
+            },
+            { once: true },
+          );
+        });
+        (globalThis as Record<string, unknown>).__e2eTunnelInfo = tunnelInfo;
+        (globalThis as Record<string, unknown>).__e2eFrpcStarted = true;
+        return {
+          nodeIp: tunnelInfo.nodeIp,
+          remotePort: tunnelInfo.remotePort,
+          protocolVersion: 2,
+        };
+      } catch (error) {
+        if (frpcStarted && tunnelInfo)
+          await invoke("stop_frpc", {
+            tunnelName: tunnelInfo.tunnelName,
+          }).catch(() => undefined);
+        if (tunnelInfo)
+          await tunnelService.deleteTempTunnel().catch(() => undefined);
+        await tunnelService.cleanupAllTempTunnels().catch(() => undefined);
+        await invoke("stop_tcp_speed_server").catch(() => undefined);
+        throw error;
+      }
+    },
+  );
 
   relay.registerCommand("e2e_cleanup", async () => {
     const { tunnelService } = await import("./tunnelService");
     const tunnelInfo = (globalThis as Record<string, unknown>).__e2eTunnelInfo;
-    const frpcStarted = (globalThis as Record<string, unknown>).__e2eFrpcStarted;
+    const frpcStarted = (globalThis as Record<string, unknown>)
+      .__e2eFrpcStarted;
 
-    if (frpcStarted) {
-      try { await invoke("stop_frpc"); } catch { /* ignore */ }
+    const errors: string[] = [];
+    if (frpcStarted && tunnelInfo) {
+      await invoke("stop_frpc", {
+        tunnelName: (tunnelInfo as { tunnelName: string }).tunnelName,
+      }).catch((error) => errors.push(String(error)));
     }
     if (tunnelInfo) {
-      try { await tunnelService.deleteTempTunnel(); } catch { /* ignore */ }
+      await tunnelService
+        .deleteTempTunnel()
+        .catch((error) => errors.push(String(error)));
     }
-    try { await tunnelService.cleanupAllTempTunnels(); } catch { /* ignore */ }
-    try { await invoke("stop_tcp_speed_server"); } catch { /* ignore */ }
+    await tunnelService
+      .cleanupAllTempTunnels()
+      .catch((error) => errors.push(String(error)));
+    await invoke("stop_tcp_speed_server").catch((error) =>
+      errors.push(String(error)),
+    );
 
     (globalThis as Record<string, unknown>).__e2eTunnelInfo = null;
     (globalThis as Record<string, unknown>).__e2eFrpcStarted = false;
 
+    if (errors.length > 0)
+      throw new Error(`资源清理失败: ${errors.join("；")}`);
     return { cleaned: true };
   });
 

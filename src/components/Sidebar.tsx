@@ -31,6 +31,12 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import type { SidebarMode } from "@/lib/settings-utils";
 import { getInitialEffectType, type EffectType } from "@/lib/settings-utils";
+import type { FeatureAvailabilityMap, FeatureKey } from "@/services/appRuntimeConfig";
+import {
+  filterVisibleSidebarItems,
+  readHiddenSidebarItems,
+  SIDEBAR_VISIBILITY_EVENT,
+} from "@/services/sidebarPreferences";
 
 /** Beta 功能悬浮提示内容由统一组件 BetaTag 提供 */
 
@@ -44,6 +50,11 @@ interface SidebarProps {
   collapsedWidth?: number;
   mode?: SidebarMode;
   disabled?: boolean;
+  deviceManagementEnabled?: boolean;
+  deviceManagementReason?: string | null;
+  sslCertificatesEnabled?: boolean;
+  sslCertificatesReason?: string | null;
+  features?: FeatureAvailabilityMap;
   /** 是否有已下载完成的待安装更新 */
   hasPendingUpdate?: boolean;
   /** 点击侧边栏"立即更新"按钮时触发安装 */
@@ -60,6 +71,11 @@ export function Sidebar({
   collapsedWidth,
   mode = "classic",
   disabled = false,
+  deviceManagementEnabled = true,
+  deviceManagementReason,
+  sslCertificatesEnabled = true,
+  sslCertificatesReason,
+  features,
   hasPendingUpdate = false,
   onInstallUpdate,
 }: SidebarProps) {
@@ -74,6 +90,7 @@ export function Sidebar({
   const [effectType, setEffectType] = useState<EffectType>(() =>
     getInitialEffectType(),
   );
+  const [hiddenItems, setHiddenItems] = useState<string[]>(readHiddenSidebarItems);
 
   useEffect(() => {
     const handleTitleBarVisibilityChange = () => {
@@ -96,12 +113,15 @@ export function Sidebar({
       "titleBarVisibilityChanged",
       handleTitleBarVisibilityChange,
     );
+    const handleSidebarVisibilityChange = () => setHiddenItems(readHiddenSidebarItems());
+    window.addEventListener(SIDEBAR_VISIBILITY_EVENT, handleSidebarVisibilityChange);
     window.addEventListener("effectTypeChanged", handleEffectTypeChange);
     return () => {
       window.removeEventListener(
         "titleBarVisibilityChanged",
         handleTitleBarVisibilityChange,
       );
+      window.removeEventListener(SIDEBAR_VISIBILITY_EVENT, handleSidebarVisibilityChange);
       window.removeEventListener("effectTypeChanged", handleEffectTypeChange);
     };
   }, []);
@@ -184,8 +204,7 @@ export function Sidebar({
     stopPolling();
     setUserMenuOpen(false);
     resetLoginFlow();
-    // 上报登录事件
-    reportUsage({ eventType: "login" }).catch(() => {});
+    reportUsage({ eventType: "login_success" }).catch(() => {});
   };
 
   /** 用户主动取消登录轮询 */
@@ -197,6 +216,7 @@ export function Sidebar({
     stopPolling();
     setLoading(false);
     toast.info("已取消登录");
+    reportUsage({ eventType: "login_cancel" }).catch(() => {});
   };
 
   const startBrowserLogin = async () => {
@@ -204,6 +224,7 @@ export function Sidebar({
     cancelRequestedRef.current = false;
     setLoading(true);
     setAuthMessage("正在准备授权页面...");
+    reportUsage({ eventType: "login_start" }).catch(() => {});
 
     try {
       const sessionId = generateSessionId();
@@ -238,6 +259,10 @@ export function Sidebar({
         cancelRequestedRef.current = false;
       } else {
         toast.error(err instanceof Error ? err.message : "登录失败");
+        reportUsage({
+          eventType: "login_failure",
+          eventData: { error_code: err instanceof Error ? err.name : "unknown" },
+        }).catch(() => {});
       }
     } finally {
       setLoading(false);
@@ -276,6 +301,28 @@ export function Sidebar({
     { id: "settings", label: "设置", icon: SettingsIcon },
     { id: "about", label: "关于", icon: Info },
   ];
+  const featureByItem: Partial<Record<string, FeatureKey>> = {
+    "node-test": "nodeTesting",
+    "dns-credentials": "dnsCredentials",
+    "dns-failover": "dnsFailover",
+    "dns-management": "ddns",
+    "ssl-certs": "sslCertificates",
+    "device-management": "deviceManagement",
+  };
+  const visibleMenuItems = filterVisibleSidebarItems(
+    menuItems,
+    hiddenItems.filter((id) => {
+      const feature = featureByItem[id];
+      return !feature || (features?.[feature]?.enabled ?? true) !== false;
+    }),
+  );
+  const getItemAvailability = (itemId: string) => {
+    const feature = featureByItem[itemId];
+    if (feature && features) return features[feature];
+    if (itemId === "device-management") return { enabled: deviceManagementEnabled, reason: deviceManagementReason };
+    if (itemId === "ssl-certs") return { enabled: sslCertificatesEnabled, reason: sslCertificatesReason };
+    return { enabled: true, reason: null };
+  };
 
   const handleMenuClick = (itemId: string) => {
     if (disabled) return;
@@ -391,21 +438,24 @@ export function Sidebar({
 
         <nav className="flex-1 px-3 py-2">
           <ul className="space-y-1">
-            {menuItems.map((item) => {
+            {visibleMenuItems.map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
+              const availability = getItemAvailability(item.id);
+              const itemDisabled = disabled || !availability.enabled;
               return (
                 <li key={item.id}>
                   <button
                     onClick={() => handleMenuClick(item.id)}
-                    disabled={disabled}
+                    aria-disabled={itemDisabled}
+                    title={!availability.enabled ? availability.reason || "该功能正在维护" : undefined}
                     className={cn(
                       "w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl transition-all duration-200 text-sm font-medium group relative overflow-hidden",
-                      disabled && "opacity-50 cursor-not-allowed",
+                      itemDisabled && "opacity-50 cursor-not-allowed",
                       isActive
                         ? "bg-primary/10 text-primary shadow-sm"
                         : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-                      !disabled && !isActive && "hover:text-foreground hover:bg-muted/50",
+                      !itemDisabled && !isActive && "hover:text-foreground hover:bg-muted/50",
                     )}
                   >
                     {isActive && (
@@ -414,7 +464,7 @@ export function Sidebar({
                     <Icon
                       className={cn(
                         "w-[18px] h-[18px] transition-transform duration-200",
-                        isActive ? "text-primary" : !disabled && "group-hover:scale-110",
+                        isActive ? "text-primary" : !itemDisabled && "group-hover:scale-110",
                       )}
                     />
                     <span className="tracking-tight">{item.label}</span>
@@ -503,6 +553,7 @@ export function Sidebar({
                   onClick={() => {
                     onUserChange(null);
                     setUserMenuOpen(false);
+                    reportUsage({ eventType: "logout" }).catch(() => {});
                     logoutWithProxyToken();
                     onTabChange("node-test");
                   }}
@@ -591,21 +642,23 @@ export function Sidebar({
 
           <nav className="relative flex-1 px-3 py-2">
             <ul className="space-y-1">
-              {menuItems.map((item) => {
+              {visibleMenuItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = activeTab === item.id;
+                const availability = getItemAvailability(item.id);
+                const itemDisabled = disabled || !availability.enabled;
                 return (
                   <li key={item.id}>
                     <button
                       onClick={() => handleMenuClick(item.id)}
-                      disabled={disabled}
+                      aria-disabled={itemDisabled}
                       className={cn(
                         "w-full flex items-center rounded-xl transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group relative overflow-hidden text-sm font-medium",
-                        disabled && "opacity-50 cursor-not-allowed",
+                        itemDisabled && "opacity-50 cursor-not-allowed",
                         isActive
                           ? "bg-primary/10 text-primary shadow-sm"
                           : "text-muted-foreground",
-                        !disabled && !isActive && "hover:text-foreground hover:bg-muted/50",
+                        !itemDisabled && !isActive && "hover:text-foreground hover:bg-muted/50",
                       )}
                       style={{
                         height: "42px",
@@ -616,7 +669,9 @@ export function Sidebar({
                         gap: collapsed ? "0px" : "12px",
                         justifyContent: "flex-start",
                       }}
-                      title={collapsed ? (item.beta ? `${item.label}（Beta）` : item.label) : undefined}
+                      title={!availability.enabled
+                        ? availability.reason || "该功能正在维护"
+                        : collapsed ? (item.beta ? `${item.label}（Beta）` : item.label) : undefined}
                     >
                       {isActive && (
                         <div

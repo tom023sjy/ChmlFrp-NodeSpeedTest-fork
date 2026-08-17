@@ -111,11 +111,14 @@ fn authed_request(
 
 /// 解析 SSL API 响应（统一结构 {msg, code, data, state}）
 fn parse_ssl_response(body: &str) -> Result<serde_json::Value, String> {
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
     let code = value.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
     if code != 200 {
-        let msg = value.get("msg").and_then(|m| m.as_str()).unwrap_or("未知错误");
+        let msg = value
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("未知错误");
         return Err(format!("SSL API 错误: {} - {}", code, msg));
     }
     Ok(value)
@@ -152,10 +155,7 @@ fn find_credential(
 /// 从 dnsRecordName 和申请域名列表中拆分出主域名和子域名
 /// 例如 dnsRecordName="_acme-challenge.ddzz.cn.", domains=["ddzz.cn","ddzz.com"]
 /// 返回 ("ddzz.cn", "_acme-challenge")
-fn split_dns_record(
-    dns_record_name: &str,
-    domains: &[String],
-) -> Result<(String, String), String> {
+fn split_dns_record(dns_record_name: &str, domains: &[String]) -> Result<(String, String), String> {
     // 去掉末尾的点
     let name = dns_record_name.trim_end_matches('.');
     // 在 domains 中找到被包含的主域名（按长度降序匹配，优先匹配更长的域名）
@@ -190,7 +190,10 @@ pub async fn ssl_list(app_handle: tauri::AppHandle) -> Result<Vec<SslCertificate
         .await
         .map_err(|e| format!("请求失败: {}", e))?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
     if !status.is_success() {
         return Err(format!("HTTP {}: {}", status, body));
     }
@@ -205,10 +208,7 @@ pub async fn ssl_list(app_handle: tauri::AppHandle) -> Result<Vec<SslCertificate
 
 /// 获取 SSL 证书详情
 #[tauri::command]
-pub async fn ssl_detail(
-    app_handle: tauri::AppHandle,
-    id: i64,
-) -> Result<SslCertificate, String> {
+pub async fn ssl_detail(app_handle: tauri::AppHandle, id: i64) -> Result<SslCertificate, String> {
     let access_token = get_access_token(&app_handle)?;
     let client = http_client()?;
     let resp = authed_request(
@@ -221,7 +221,10 @@ pub async fn ssl_detail(
     .await
     .map_err(|e| format!("请求失败: {}", e))?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
     if !status.is_success() {
         return Err(format!("HTTP {}: {}", status, body));
     }
@@ -243,14 +246,22 @@ pub async fn ssl_request(
         "domains": params.domains,
         "challengeType": params.challenge_type,
     });
-    let resp = authed_request(&client, reqwest::Method::POST, "/ssl/request", &access_token)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
+    let resp = authed_request(
+        &client,
+        reqwest::Method::POST,
+        "/ssl/request",
+        &access_token,
+    )
+    .header("Content-Type", "application/json")
+    .json(&payload)
+    .send()
+    .await
+    .map_err(|e| format!("请求失败: {}", e))?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
     if !status.is_success() {
         return Err(format!("HTTP {}: {}", status, body));
     }
@@ -261,10 +272,7 @@ pub async fn ssl_request(
 
 /// 触发域名验证
 #[tauri::command]
-pub async fn ssl_verify(
-    app_handle: tauri::AppHandle,
-    id: i64,
-) -> Result<SslCertificate, String> {
+pub async fn ssl_verify(app_handle: tauri::AppHandle, id: i64) -> Result<SslCertificate, String> {
     let access_token = get_access_token(&app_handle)?;
     let client = http_client()?;
     let resp = authed_request(
@@ -274,12 +282,15 @@ pub async fn ssl_verify(
         &access_token,
     )
     .header("Content-Type", "application/json")
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .map_err(|e| format!("请求失败: {}", e))?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
     // verify 接口可能返回 524 超时，此时返回提示让前端轮询
     if status.as_u16() == 524 {
         return Err("验证请求超时，请稍后查询证书状态确认结果".to_string());
@@ -294,10 +305,7 @@ pub async fn ssl_verify(
 
 /// 删除 SSL 证书
 #[tauri::command]
-pub async fn ssl_delete(
-    app_handle: tauri::AppHandle,
-    id: i64,
-) -> Result<(), String> {
+pub async fn ssl_delete(app_handle: tauri::AppHandle, id: i64) -> Result<(), String> {
     let access_token = get_access_token(&app_handle)?;
     let client = http_client()?;
     let resp = authed_request(
@@ -310,7 +318,10 @@ pub async fn ssl_delete(
     .await
     .map_err(|e| format!("请求失败: {}", e))?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
     if !status.is_success() {
         return Err(format!("HTTP {}: {}", status, body));
     }
@@ -337,36 +348,61 @@ pub async fn ssl_auto_request(
         "domains": params.domains,
         "challengeType": params.challenge_type,
     });
-    let resp = authed_request(&client, reqwest::Method::POST, "/ssl/request", &access_token)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
+    let resp = authed_request(
+        &client,
+        reqwest::Method::POST,
+        "/ssl/request",
+        &access_token,
+    )
+    .header("Content-Type", "application/json")
+    .json(&payload)
+    .send()
+    .await
+    .map_err(|e| format!("申请请求失败: {}", e))?;
+    let body = resp
+        .text()
         .await
-        .map_err(|e| format!("申请请求失败: {}", e))?;
-    let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        .map_err(|e| format!("读取响应失败: {}", e))?;
     let value = parse_ssl_response(&body)?;
-    let cert: SslCertificate = serde_json::from_value(value.get("data").cloned().unwrap_or_default())
-        .map_err(|e| format!("解析申请结果失败: {}", e))?;
-    logs.push(format!("申请已创建，ID: {}，状态: {}", cert.id, cert.status));
+    let cert: SslCertificate =
+        serde_json::from_value(value.get("data").cloned().unwrap_or_default())
+            .map_err(|e| format!("解析申请结果失败: {}", e))?;
+    logs.push(format!(
+        "申请已创建，ID: {}，状态: {}",
+        cert.id, cert.status
+    ));
 
-    let dns_record_name = cert.dns_record_name.as_deref().ok_or_else(|| {
-        "申请成功但未返回 DNS 记录名，无法自动验证".to_string()
-    })?;
-    let dns_record_value = cert.dns_record_value.as_deref().ok_or_else(|| {
-        "申请成功但未返回 DNS 记录值，无法自动验证".to_string()
-    })?;
+    let dns_record_name = cert
+        .dns_record_name
+        .as_deref()
+        .ok_or_else(|| "申请成功但未返回 DNS 记录名，无法自动验证".to_string())?;
+    let dns_record_value = cert
+        .dns_record_value
+        .as_deref()
+        .ok_or_else(|| "申请成功但未返回 DNS 记录值，无法自动验证".to_string())?;
 
     // 2. 用 DNS 凭证添加 TXT 记录（备注标注用途，提示用户勿删）
-    logs.push(format!("正在添加 TXT 记录: {} = {}", dns_record_name, dns_record_value));
+    logs.push(format!(
+        "正在添加 TXT 记录: {} = {}",
+        dns_record_name, dns_record_value
+    ));
     let cred = find_credential(&app_handle, &params.credential_id, &username)?;
     let (domain, subdomain) = split_dns_record(dns_record_name, &params.domains)?;
     logs.push(format!("拆分结果: 主域名={}, 子域名={}", domain, subdomain));
-    dns_provider::upsert_record_with_remarks(&cred, &domain, &subdomain, "TXT", dns_record_value, SSL_TXT_RECORD_REMARKS)
-        .await
-        .map_err(|e| {
-            format!("添加 TXT 记录失败: {}（可手动添加后重实验证）", e)
-        })?;
-    logs.push(format!("TXT 记录添加成功（备注：{}）", SSL_TXT_RECORD_REMARKS));
+    dns_provider::upsert_record_with_remarks(
+        &cred,
+        &domain,
+        &subdomain,
+        "TXT",
+        dns_record_value,
+        SSL_TXT_RECORD_REMARKS,
+    )
+    .await
+    .map_err(|e| format!("添加 TXT 记录失败: {}（可手动添加后重实验证）", e))?;
+    logs.push(format!(
+        "TXT 记录添加成功（备注：{}）",
+        SSL_TXT_RECORD_REMARKS
+    ));
 
     // 3. 等待 DNS 传播（10 秒）
     logs.push("等待 DNS 记录传播（10 秒）...".to_string());
@@ -427,18 +463,12 @@ pub async fn ssl_auto_request(
                         ) {
                             final_cert = c.clone();
                             if final_cert.status == "issued" {
-                                logs.push(format!(
-                                    "第 {} 次轮询：证书已签发！",
-                                    attempt
-                                ));
+                                logs.push(format!("第 {} 次轮询：证书已签发！", attempt));
                                 break;
                             }
                             if let Some(err) = &final_cert.error_message {
                                 if !err.is_empty() {
-                                    logs.push(format!(
-                                        "第 {} 次轮询：验证失败 - {}",
-                                        attempt, err
-                                    ));
+                                    logs.push(format!("第 {} 次轮询：验证失败 - {}", attempt, err));
                                     break;
                                 }
                             }
@@ -504,7 +534,11 @@ pub async fn ssl_auto_request_async(
     let task_id_clone = task_id.clone();
 
     tauri::async_runtime::spawn(async move {
-        let emit = |stage: &str, message: String, cert_id: Option<i64>, is_final: bool, final_status: Option<String>| {
+        let emit = |stage: &str,
+                    message: String,
+                    cert_id: Option<i64>,
+                    is_final: bool,
+                    final_status: Option<String>| {
             let _ = handle.emit(
                 "ssl-request-progress",
                 SslRequestProgress {
@@ -521,30 +555,53 @@ pub async fn ssl_auto_request_async(
         let access_token = match get_access_token(&handle) {
             Ok(t) => t,
             Err(e) => {
-                emit("error", format!("获取登录状态失败: {}", e), None, true, None);
+                emit(
+                    "error",
+                    format!("获取登录状态失败: {}", e),
+                    None,
+                    true,
+                    None,
+                );
                 return;
             }
         };
         let client = match http_client() {
             Ok(c) => c,
             Err(e) => {
-                emit("error", format!("创建 HTTP 客户端失败: {}", e), None, true, None);
+                emit(
+                    "error",
+                    format!("创建 HTTP 客户端失败: {}", e),
+                    None,
+                    true,
+                    None,
+                );
                 return;
             }
         };
 
         // 1. 创建证书申请
-        emit("requesting", format!("正在向 {} 申请证书...", params.provider), None, false, None);
+        emit(
+            "requesting",
+            format!("正在向 {} 申请证书...", params.provider),
+            None,
+            false,
+            None,
+        );
         let payload = serde_json::json!({
             "provider": params.provider,
             "domains": params.domains,
             "challengeType": params.challenge_type,
         });
-        let resp = match authed_request(&client, reqwest::Method::POST, "/ssl/request", &access_token)
-            .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
+        let resp = match authed_request(
+            &client,
+            reqwest::Method::POST,
+            "/ssl/request",
+            &access_token,
+        )
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
         {
             Ok(r) => r,
             Err(e) => {
@@ -562,62 +619,144 @@ pub async fn ssl_auto_request_async(
         let value = match parse_ssl_response(&body) {
             Ok(v) => v,
             Err(e) => {
-                emit("error", format!("解析申请响应失败: {}", e), None, true, None);
+                emit(
+                    "error",
+                    format!("解析申请响应失败: {}", e),
+                    None,
+                    true,
+                    None,
+                );
                 return;
             }
         };
-        let cert: SslCertificate = match serde_json::from_value(value.get("data").cloned().unwrap_or_default()) {
-            Ok(c) => c,
-            Err(e) => {
-                emit("error", format!("解析申请结果失败: {}", e), None, true, None);
-                return;
-            }
-        };
-        emit("requesting", format!("申请已创建，ID: {}，状态: {}", cert.id, cert.status), Some(cert.id), false, None);
+        let cert: SslCertificate =
+            match serde_json::from_value(value.get("data").cloned().unwrap_or_default()) {
+                Ok(c) => c,
+                Err(e) => {
+                    emit(
+                        "error",
+                        format!("解析申请结果失败: {}", e),
+                        None,
+                        true,
+                        None,
+                    );
+                    return;
+                }
+            };
+        emit(
+            "requesting",
+            format!("申请已创建，ID: {}，状态: {}", cert.id, cert.status),
+            Some(cert.id),
+            false,
+            None,
+        );
 
         let dns_record_name = match cert.dns_record_name.as_deref() {
             Some(n) => n,
             None => {
-                emit("error", "申请成功但未返回 DNS 记录名，无法自动验证".to_string(), Some(cert.id), true, None);
+                emit(
+                    "error",
+                    "申请成功但未返回 DNS 记录名，无法自动验证".to_string(),
+                    Some(cert.id),
+                    true,
+                    None,
+                );
                 return;
             }
         };
         let dns_record_value = match cert.dns_record_value.as_deref() {
             Some(v) => v,
             None => {
-                emit("error", "申请成功但未返回 DNS 记录值，无法自动验证".to_string(), Some(cert.id), true, None);
+                emit(
+                    "error",
+                    "申请成功但未返回 DNS 记录值，无法自动验证".to_string(),
+                    Some(cert.id),
+                    true,
+                    None,
+                );
                 return;
             }
         };
 
         // 2. 添加 TXT 记录
-        emit("adding_txt", format!("正在添加 TXT 记录: {}", dns_record_name), Some(cert.id), false, None);
+        emit(
+            "adding_txt",
+            format!("正在添加 TXT 记录: {}", dns_record_name),
+            Some(cert.id),
+            false,
+            None,
+        );
         let cred = match find_credential(&handle, &params.credential_id, &username) {
             Ok(c) => c,
             Err(e) => {
-                emit("error", format!("获取 DNS 凭证失败: {}", e), Some(cert.id), true, None);
+                emit(
+                    "error",
+                    format!("获取 DNS 凭证失败: {}", e),
+                    Some(cert.id),
+                    true,
+                    None,
+                );
                 return;
             }
         };
         let (domain, subdomain) = match split_dns_record(dns_record_name, &params.domains) {
             Ok(d) => d,
             Err(e) => {
-                emit("error", format!("拆分 DNS 记录失败: {}", e), Some(cert.id), true, None);
+                emit(
+                    "error",
+                    format!("拆分 DNS 记录失败: {}", e),
+                    Some(cert.id),
+                    true,
+                    None,
+                );
                 return;
             }
         };
-        if let Err(e) = dns_provider::upsert_record_with_remarks(&cred, &domain, &subdomain, "TXT", dns_record_value, SSL_TXT_RECORD_REMARKS).await {
-            emit("error", format!("添加 TXT 记录失败: {}", e), Some(cert.id), true, None);
+        if let Err(e) = dns_provider::upsert_record_with_remarks(
+            &cred,
+            &domain,
+            &subdomain,
+            "TXT",
+            dns_record_value,
+            SSL_TXT_RECORD_REMARKS,
+        )
+        .await
+        {
+            emit(
+                "error",
+                format!("添加 TXT 记录失败: {}", e),
+                Some(cert.id),
+                true,
+                None,
+            );
             return;
         }
-        emit("adding_txt", format!("TXT 记录添加成功（备注：{}）", SSL_TXT_RECORD_REMARKS), Some(cert.id), false, None);
+        emit(
+            "adding_txt",
+            format!("TXT 记录添加成功（备注：{}）", SSL_TXT_RECORD_REMARKS),
+            Some(cert.id),
+            false,
+            None,
+        );
 
         // 3. 等待 DNS 传播
-        emit("waiting_dns", "等待 DNS 记录传播（10 秒）...".to_string(), Some(cert.id), false, None);
+        emit(
+            "waiting_dns",
+            "等待 DNS 记录传播（10 秒）...".to_string(),
+            Some(cert.id),
+            false,
+            None,
+        );
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         // 4. 触发验证
-        emit("verifying", "正在触发域名验证...".to_string(), Some(cert.id), false, None);
+        emit(
+            "verifying",
+            "正在触发域名验证...".to_string(),
+            Some(cert.id),
+            false,
+            None,
+        );
         let verify_resp = authed_request(
             &client,
             reqwest::Method::POST,
@@ -633,24 +772,60 @@ pub async fn ssl_auto_request_async(
                 let status = r.status();
                 let _ = r.text().await;
                 if status.as_u16() == 524 {
-                    emit("verifying", "验证请求超时（524），将继续轮询状态".to_string(), Some(cert.id), false, None);
+                    emit(
+                        "verifying",
+                        "验证请求超时（524），将继续轮询状态".to_string(),
+                        Some(cert.id),
+                        false,
+                        None,
+                    );
                 } else if !status.is_success() {
-                    emit("verifying", format!("验证请求返回 HTTP {}，将继续轮询", status), Some(cert.id), false, None);
+                    emit(
+                        "verifying",
+                        format!("验证请求返回 HTTP {}，将继续轮询", status),
+                        Some(cert.id),
+                        false,
+                        None,
+                    );
                 } else {
-                    emit("verifying", "验证请求已发送".to_string(), Some(cert.id), false, None);
+                    emit(
+                        "verifying",
+                        "验证请求已发送".to_string(),
+                        Some(cert.id),
+                        false,
+                        None,
+                    );
                 }
             }
             Err(e) => {
-                emit("verifying", format!("验证请求失败: {}，将继续轮询", e), Some(cert.id), false, None);
+                emit(
+                    "verifying",
+                    format!("验证请求失败: {}，将继续轮询", e),
+                    Some(cert.id),
+                    false,
+                    None,
+                );
             }
         }
 
         // 5. 轮询证书详情
-        emit("polling", "开始轮询证书状态...".to_string(), Some(cert.id), false, None);
+        emit(
+            "polling",
+            "开始轮询证书状态...".to_string(),
+            Some(cert.id),
+            false,
+            None,
+        );
         let poll_client = match http_client() {
             Ok(c) => c,
             Err(e) => {
-                emit("error", format!("创建轮询客户端失败: {}", e), Some(cert.id), true, None);
+                emit(
+                    "error",
+                    format!("创建轮询客户端失败: {}", e),
+                    Some(cert.id),
+                    true,
+                    None,
+                );
                 return;
             }
         };
@@ -677,30 +852,66 @@ pub async fn ssl_auto_request_async(
                             ) {
                                 final_status = c.status.clone();
                                 if c.status == "issued" {
-                                    emit("polling", format!("第 {} 次轮询：证书已签发！", attempt), Some(cert.id), false, None);
+                                    emit(
+                                        "polling",
+                                        format!("第 {} 次轮询：证书已签发！", attempt),
+                                        Some(cert.id),
+                                        false,
+                                        None,
+                                    );
                                     break;
                                 }
                                 if let Some(err) = &c.error_message {
                                     if !err.is_empty() {
-                                        emit("polling", format!("第 {} 次轮询：验证失败 - {}", attempt, err), Some(cert.id), false, None);
+                                        emit(
+                                            "polling",
+                                            format!("第 {} 次轮询：验证失败 - {}", attempt, err),
+                                            Some(cert.id),
+                                            false,
+                                            None,
+                                        );
                                         break;
                                     }
                                 }
-                                emit("polling", format!("第 {} 次轮询：状态 {}", attempt, c.status), Some(cert.id), false, None);
+                                emit(
+                                    "polling",
+                                    format!("第 {} 次轮询：状态 {}", attempt, c.status),
+                                    Some(cert.id),
+                                    false,
+                                    None,
+                                );
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    emit("polling", format!("第 {} 次轮询失败: {}", attempt, e), Some(cert.id), false, None);
+                    emit(
+                        "polling",
+                        format!("第 {} 次轮询失败: {}", attempt, e),
+                        Some(cert.id),
+                        false,
+                        None,
+                    );
                 }
             }
         }
 
         if final_status == "issued" {
-            emit("done", "证书申请成功！".to_string(), Some(cert.id), true, Some(final_status));
+            emit(
+                "done",
+                "证书申请成功！".to_string(),
+                Some(cert.id),
+                true,
+                Some(final_status),
+            );
         } else {
-            emit("done", format!("轮询结束，最终状态: {}", final_status), Some(cert.id), true, Some(final_status.clone()));
+            emit(
+                "done",
+                format!("轮询结束，最终状态: {}", final_status),
+                Some(cert.id),
+                true,
+                Some(final_status.clone()),
+            );
         }
     });
 
@@ -734,14 +945,11 @@ pub struct SslRequestLog {
 
 /// 保存一条申请日志（前端在申请完成时调用）
 #[tauri::command]
-pub async fn ssl_save_log(
-    _app_handle: tauri::AppHandle,
-    log: SslRequestLog,
-) -> Result<(), String> {
+pub async fn ssl_save_log(_app_handle: tauri::AppHandle, log: SslRequestLog) -> Result<(), String> {
     let conn = db::get_conn()?;
     // logs 字段为 Vec<String>，序列化为 JSON 字符串存储
-    let logs_json = serde_json::to_string(&log.logs)
-        .map_err(|e| format!("序列化日志失败: {}", e))?;
+    let logs_json =
+        serde_json::to_string(&log.logs).map_err(|e| format!("序列化日志失败: {}", e))?;
     // 同 ID 覆盖（INSERT OR REPLACE）
     conn.execute(
         "INSERT OR REPLACE INTO ssl_logs (id, domains, provider, final_status, logs, created_at, finished_at, owner_username) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -803,13 +1011,13 @@ pub async fn ssl_list_logs(
 
 /// 清空当前用户的所有申请日志
 #[tauri::command]
-pub async fn ssl_clear_logs(
-    _app_handle: tauri::AppHandle,
-    username: String,
-) -> Result<(), String> {
+pub async fn ssl_clear_logs(_app_handle: tauri::AppHandle, username: String) -> Result<(), String> {
     let conn = db::get_conn()?;
     // 仅删除当前用户的日志，保留其他用户的日志
-    conn.execute("DELETE FROM ssl_logs WHERE owner_username = ?1", rusqlite::params![username])
-        .map_err(|e| format!("清空 SSL 日志失败: {}", e))?;
+    conn.execute(
+        "DELETE FROM ssl_logs WHERE owner_username = ?1",
+        rusqlite::params![username],
+    )
+    .map_err(|e| format!("清空 SSL 日志失败: {}", e))?;
     Ok(())
 }

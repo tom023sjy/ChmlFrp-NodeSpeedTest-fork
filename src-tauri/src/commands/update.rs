@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
-/// 更新 API 地址
-const UPDATE_API_URL: &str = "https://u.zdzz.top/api/node-selector.json";
+/// 更新 API 地址（注意：服务端已去掉 .json 后缀，旧路径 /api/node-selector.json 返回 404）
+const UPDATE_API_URL: &str = "https://u.zdzz.top/api/node-selector";
 /// 进度事件触发阈值（每下载 100KB 推送一次）
 const PROGRESS_EMIT_THRESHOLD: u64 = 100 * 1024;
 /// hash 校验缓冲区
@@ -79,11 +79,7 @@ fn compare_versions(a: &str, b: &str) -> i32 {
 }
 
 /// 根据当前平台选择最合适的安装包
-fn select_package(
-    response: &AppUpdateResponse,
-    os: &str,
-    _arch: &str,
-) -> Option<AppUpdatePackage> {
+fn select_package(response: &AppUpdateResponse, os: &str, _arch: &str) -> Option<AppUpdatePackage> {
     let packages = match os {
         "windows" => &response.platforms.windows,
         "macos" => &response.platforms.macos,
@@ -210,10 +206,8 @@ pub async fn check_app_update(
         return Ok(None);
     }
 
-    let package =
-        select_package(&update_response, os, arch).ok_or_else(|| {
-            format!("未找到适合当前平台的安装包: {} {}", os, arch)
-        })?;
+    let package = select_package(&update_response, os, arch)
+        .ok_or_else(|| format!("未找到适合当前平台的安装包: {} {}", os, arch))?;
 
     Ok(Some(AppUpdateInfo {
         version: update_response.version.clone(),
@@ -250,7 +244,10 @@ pub async fn download_app_update(
         .await
         .map_err(|e| {
             log::error!("下载请求失败: {}", e);
-            format!("下载请求失败: {}（若网络需代理访问 GitHub，请检查系统代理设置）", e)
+            format!(
+                "下载请求失败: {}（若网络需代理访问 GitHub，请检查系统代理设置）",
+                e
+            )
         })?;
 
     let status = response.status();
@@ -352,17 +349,13 @@ pub async fn download_app_update(
 /// 查询当前是否有已下载完成、待安装的更新
 /// 前端用于：1) 启动时恢复"立即更新"按钮 2) 侧边栏显示状态
 #[tauri::command]
-pub async fn get_pending_installer(
-    app_handle: tauri::AppHandle,
-) -> Result<Option<String>, String> {
+pub async fn get_pending_installer(app_handle: tauri::AppHandle) -> Result<Option<String>, String> {
     Ok(peek_pending_installer(&app_handle))
 }
 
 /// 清除待安装记录（用户取消或安装包失效时调用）
 #[tauri::command]
-pub async fn clear_pending_installer(
-    app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn clear_pending_installer(app_handle: tauri::AppHandle) -> Result<(), String> {
     let _ = take_pending_installer(&app_handle);
     Ok(())
 }
@@ -421,7 +414,14 @@ $shell.ShellExecute($appExe,'','','open',1)"#,
         use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW = 0x08000000，确保不出现任何控制台窗口
         match std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                &script,
+            ])
             .creation_flags(0x08000000)
             .spawn()
         {
@@ -483,16 +483,12 @@ pub fn launch_installer_silent(_app_handle: &tauri::AppHandle, file_path: &str) 
                 std::process::Command::new(file_path).spawn()
             }
         }
-        "macos" => std::process::Command::new("open")
-            .arg(file_path)
-            .spawn(),
-        "linux" => std::process::Command::new(file_path)
-            .spawn()
-            .or_else(|_| {
-                std::process::Command::new("xdg-open")
-                    .arg(file_path)
-                    .spawn()
-            }),
+        "macos" => std::process::Command::new("open").arg(file_path).spawn(),
+        "linux" => std::process::Command::new(file_path).spawn().or_else(|_| {
+            std::process::Command::new("xdg-open")
+                .arg(file_path)
+                .spawn()
+        }),
         _ => return false,
     };
 

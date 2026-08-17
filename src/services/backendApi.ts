@@ -18,15 +18,7 @@ import { getStoredUser, type StoredUser } from "@/services/api";
 // ===== 类型定义 =====
 
 /** 使用量事件类型（与后端 allowedTypes 保持一致） */
-export type UsageEventType =
-  | "app_launch"
-  | "node_test"
-  | "dns_monitor"
-  | "ddns_update"
-  | "ssl_request"
-  | "frpc_config"
-  | "background_change"
-  | "login";
+export type UsageEventType = string;
 
 /** 使用量上报请求体 */
 export interface UsageReportPayload {
@@ -34,6 +26,10 @@ export interface UsageReportPayload {
   eventData?: Record<string, unknown>;
   appVersion?: string;
   platform?: string;
+  eventId?: string;
+  eventVersion?: number;
+  sessionId?: string;
+  clientTime?: string;
 }
 
 /** 使用量上报响应 */
@@ -70,6 +66,20 @@ export interface IssueSubmitPayload {
   contactEmail?: string;
   /** 联系手机号（选填，留空即匿名） */
   contactPhone?: string;
+  attachments?: File[];
+}
+
+export interface IssueSubmitPermission {
+  success: boolean;
+  allowed: boolean;
+  code: "ISSUE_SUBMIT_ALLOWED" | "ISSUE_BANNED" | "ISSUE_NEW_USER_COOLDOWN" | "ISSUE_DAILY_LIMIT";
+  message: string;
+  dailyLimit: number;
+  submittedToday: number;
+  remainingToday: number;
+  firstLoginAt: string | null;
+  eligibleAt: string | null;
+  bannedReason: string | null;
 }
 
 /** 问题上报响应 */
@@ -102,6 +112,17 @@ export interface IssueListResponse {
   pageSize: number;
 }
 
+/** 工单附件 */
+export interface IssueAttachment {
+  id: number;
+  name: string;
+  mimeType: string;
+  size: number;
+  /** 归属回复 ID，null 表示工单主附件 */
+  replyId: number | null;
+  downloadUrl: string;
+}
+
 /** 工单回复 */
 export interface IssueReply {
   id: number;
@@ -110,6 +131,8 @@ export interface IssueReply {
   replied_by?: string | null;
   content: string;
   created_at: string;
+  /** 该回复携带的附件 */
+  attachments: IssueAttachment[];
 }
 
 /** 工单详情 */
@@ -125,6 +148,8 @@ export interface IssueDetail {
   created_at: string;
   updated_at: string;
   replies: IssueReply[];
+  /** 工单主附件 */
+  attachments: IssueAttachment[];
 }
 
 /** 工单详情响应 */
@@ -208,6 +233,25 @@ function getPlatform(): string {
 }
 
 /** 统一解析后端 JSON 响应并处理错误 */
+export class BackendApiError extends Error {
+  readonly code?: string;
+  readonly status?: number;
+  readonly details?: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    code?: string,
+    status?: number,
+    details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "BackendApiError";
+    this.code = code;
+    this.status = status;
+    this.details = details;
+  }
+}
+
 async function parseBackendJson<T>(response: Response, fallback: string): Promise<T> {
   const text = await response.text();
   let data: unknown;
@@ -218,34 +262,38 @@ async function parseBackendJson<T>(response: Response, fallback: string): Promis
   }
 
   // 后端统一返回 { success: boolean, message?: string, ... }
-  const typed = data as { success?: boolean; message?: string } & T;
+  const typed = data as { success?: boolean; message?: string; code?: string } & T;
+  const details = typeof data === "object" && data !== null ? data as Record<string, unknown> : undefined;
 
   if (response.status === 401) {
-    throw new Error("登录信息已过期，请重新登录");
+    throw new BackendApiError("登录信息已过期，请重新登录", typed.code, 401, details);
   }
 
   if (response.status === 403) {
-    throw new Error(typed.message || "操作被拒绝，请完成验证码校验");
+    throw new BackendApiError(typed.message || "操作被拒绝，请完成验证码校验", typed.code, 403, details);
   }
 
   if (!response.ok) {
-    throw new Error(typed.message || fallback);
+    throw new BackendApiError(typed.message || fallback, typed.code, response.status, details);
   }
 
   if (typed.success === false) {
-    throw new Error(typed.message || fallback);
+    throw new BackendApiError(typed.message || fallback, typed.code, response.status, details);
   }
 
   return typed;
 }
 
 /** 构造带认证的请求头 */
-function authHeaders(extra?: Record<string, string>): Record<string, string> {
+function authHeaders(extra?: Record<string, string | undefined>): Record<string, string> {
   const token = getAccessToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...extra,
   };
+  for (const [key, value] of Object.entries(extra || {})) {
+    if (value === undefined) delete headers[key];
+    else headers[key] = value;
+  }
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -437,6 +485,8 @@ export async function reportUsage(
 ): Promise<UsageReportResponse> {
   const appVersion = payload.appVersion || (await getAppVersion());
   const platform = payload.platform || getPlatform();
+  const eventId = payload.eventId || crypto.randomUUID();
+  const sessionId = payload.sessionId || getUsageSessionId();
 
   const res = await fetch(backendUrl("/api/usage/report"), {
     method: "POST",
@@ -446,12 +496,22 @@ export async function reportUsage(
       eventData: payload.eventData,
       appVersion,
       platform,
+      eventId,
+      eventVersion: payload.eventVersion || 1,
+      sessionId,
+      clientTime: payload.clientTime || new Date().toISOString(),
     }),
     cache: "no-store",
     credentials: "omit",
   });
 
   return parseBackendJson<UsageReportResponse>(res, "使用量上报失败");
+}
+
+const usageSessionId = crypto.randomUUID();
+
+function getUsageSessionId(): string {
+  return usageSessionId;
 }
 
 /**
@@ -486,39 +546,117 @@ export async function getGeetestConfig(): Promise<GeetestConfig> {
 // ===== 工单 =====
 
 /**
+ * 通过 XMLHttpRequest 上传 FormData，支持上传进度回调。
+ * 错误语义与 parseBackendJson 保持一致，统一抛出 BackendApiError。
+ */
+function uploadFormData<T>(
+  url: string,
+  formData: FormData,
+  fallback: string,
+  onUploadProgress?: (percent: number) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+
+    // 与 authHeaders({ "Content-Type": undefined }) 一致：
+    // multipart 边界由浏览器自动生成，不能手动设置 Content-Type
+    const headers = authHeaders();
+    delete headers["Content-Type"];
+    for (const [key, value] of Object.entries(headers)) {
+      xhr.setRequestHeader(key, value);
+    }
+
+    if (onUploadProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onUploadProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+        }
+      };
+      // 发送开始即回调 0，让界面立即进入"上传中"状态
+      onUploadProgress(0);
+    }
+
+    xhr.onload = () => {
+      let data: unknown;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        reject(new BackendApiError(fallback, undefined, xhr.status));
+        return;
+      }
+      const typed = data as { success?: boolean; message?: string; code?: string } & T;
+      const details = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : undefined;
+
+      if (xhr.status === 401) {
+        reject(new BackendApiError("登录信息已过期，请重新登录", typed.code, 401, details));
+        return;
+      }
+      if (xhr.status === 403) {
+        reject(new BackendApiError(typed.message || "操作被拒绝，请完成验证码校验", typed.code, 403, details));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new BackendApiError(typed.message || fallback, typed.code, xhr.status, details));
+        return;
+      }
+      if (typed.success === false) {
+        reject(new BackendApiError(typed.message || fallback, typed.code, xhr.status, details));
+        return;
+      }
+      resolve(typed);
+    };
+    xhr.onerror = () => reject(new BackendApiError("网络错误，上传失败", undefined, 0));
+    xhr.onabort = () => reject(new BackendApiError("上传已取消", undefined, 0));
+
+    xhr.send(formData);
+  });
+}
+
+/**
  * 提交工单
  * 需要极验验证码校验结果（后端强制要求）
+ * @param onUploadProgress 上传进度回调（0-100），用于附件上传进度条
  */
 export async function submitIssue(
   payload: IssueSubmitPayload,
   geetest: GeetestValidation,
+  onUploadProgress?: (percent: number) => void,
 ): Promise<IssueSubmitResponse> {
   const appVersion = payload.appVersion || (await getAppVersion());
   const platform = payload.platform || getPlatform();
+  const formData = new FormData();
+  formData.append("title", payload.title);
+  formData.append("description", payload.description);
+  formData.append("category", payload.category || "other");
+  formData.append("appVersion", appVersion || "");
+  formData.append("platform", platform);
+  formData.append("contactEmail", payload.contactEmail?.trim() || "");
+  formData.append("contactPhone", payload.contactPhone?.trim() || "");
+  formData.append("captcha", JSON.stringify({
+    lot_number: geetest.lot_number,
+    captcha_output: geetest.captcha_output,
+    pass_token: geetest.pass_token,
+    gen_time: geetest.gen_time,
+  }));
+  payload.attachments?.forEach((file) => formData.append("attachments", file, file.name));
 
-  const res = await fetch(backendUrl("/api/issues/submit"), {
-    method: "POST",
+  return uploadFormData<IssueSubmitResponse>(
+    backendUrl("/api/issues/submit"),
+    formData,
+    "工单提交失败",
+    onUploadProgress,
+  );
+}
+
+export async function getIssueSubmitPermission(): Promise<IssueSubmitPermission> {
+  const res = await fetch(backendUrl("/api/issues/submit-permission"), {
+    method: "GET",
     headers: authHeaders(),
-    body: JSON.stringify({
-      title: payload.title,
-      description: payload.description,
-      category: payload.category,
-      appVersion,
-      platform,
-      contactEmail: payload.contactEmail?.trim() || "",
-      contactPhone: payload.contactPhone?.trim() || "",
-      captcha: {
-        lot_number: geetest.lot_number,
-        captcha_output: geetest.captcha_output,
-        pass_token: geetest.pass_token,
-        gen_time: geetest.gen_time,
-      },
-    }),
     cache: "no-store",
     credentials: "omit",
   });
-
-  return parseBackendJson<IssueSubmitResponse>(res, "工单提交失败");
+  return parseBackendJson<IssueSubmitPermission>(res, "获取工单提交资格失败");
 }
 
 /**
@@ -565,23 +703,67 @@ export interface IssueReplyResponse {
 }
 
 /**
- * 用户回复工单
+ * 用户回复工单（支持附件）
  * @param issueId 工单 ID
  * @param content 回复内容
+ * @param files 回复附件（最多 3 个）
+ * @param onUploadProgress 附件上传进度回调（0-100，仅带附件时触发）
  */
 export async function replyIssue(
   issueId: number,
   content: string,
+  files: File[] = [],
+  onUploadProgress?: (percent: number) => void,
 ): Promise<IssueReplyResponse> {
+  if (files.length > 0) {
+    const formData = new FormData();
+    formData.append("content", content);
+    files.forEach((file) => formData.append("attachments", file, file.name));
+    return uploadFormData<IssueReplyResponse>(
+      backendUrl(`/api/issues/${issueId}/reply`),
+      formData,
+      "回复工单失败",
+      onUploadProgress,
+    );
+  }
   const res = await fetch(backendUrl(`/api/issues/${issueId}/reply`), {
     method: "POST",
-    headers: authHeaders(),
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
     cache: "no-store",
     credentials: "omit",
   });
 
   return parseBackendJson<IssueReplyResponse>(res, "回复工单失败");
+}
+
+/** 附件预览 URL 响应 */
+export interface AttachmentPreviewResponse {
+  success: boolean;
+  /** 完整预览地址（短期签名，10 分钟有效） */
+  url: string;
+  mimeType: string;
+}
+
+/**
+ * 获取附件在线预览地址（短期签名 URL，img/video 标签可直接引用）
+ */
+export async function getAttachmentPreviewUrl(
+  issueId: number,
+  attachmentId: number,
+): Promise<AttachmentPreviewResponse> {
+  const res = await fetch(
+    backendUrl(`/api/issues/${issueId}/attachments/${attachmentId}/preview-url`),
+    {
+      method: "GET",
+      headers: authHeaders(),
+      cache: "no-store",
+      credentials: "omit",
+    },
+  );
+  const data = await parseBackendJson<AttachmentPreviewResponse>(res, "获取附件预览失败");
+  // 后端返回相对路径，拼接为完整地址
+  return { ...data, url: backendUrl(data.url) };
 }
 
 // ===== 便捷工具 =====

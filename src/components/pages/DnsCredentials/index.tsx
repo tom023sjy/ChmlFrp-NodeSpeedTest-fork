@@ -14,7 +14,7 @@ import {
 import { Plus, Pencil, Trash2, KeyRound, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { type StoredUser } from "@/services/api";
+import { type StoredUser, getStoredUser } from "@/services/api";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   dnsFailoverService,
@@ -22,6 +22,14 @@ import {
   type DnsProviderKind,
 } from "@/services/dnsFailoverService";
 import { useEffectType, getCardClassName } from "@/lib/useEffectType";
+import { reportUsage } from "@/services/backendApi";
+import { dnsFailoverCloudService } from "@/services/dnsFailoverCloudService";
+
+/** 已登录时上报事件，失败静默处理 */
+function reportUsageIfLoggedIn(eventType: string, eventData?: Record<string, unknown>): void {
+  if (!getStoredUser()?.accessToken) return;
+  reportUsage({ eventType, eventData }).catch(() => {});
+}
 
 const PROVIDERS: { value: DnsProviderKind; label: string }[] = [
   { value: "dnspodCn", label: "DNSPod.cn（腾讯云 API 3.0）" },
@@ -78,6 +86,7 @@ export function DnsCredentials({ user }: DnsCredentialsProps) {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<DnsCredential | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [cloudMode, setCloudMode] = useState(false);
 
   const load = useCallback(async () => {
     if (!user?.username) {
@@ -87,7 +96,13 @@ export function DnsCredentials({ user }: DnsCredentialsProps) {
     }
     setLoading(true);
     try {
-      setList(await dnsFailoverService.listCredentials(user.username));
+      try {
+        setList(await dnsFailoverCloudService.listCredentials());
+        setCloudMode(true);
+      } catch {
+        setList(await dnsFailoverService.listCredentials(user.username));
+        setCloudMode(false);
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "加载凭证失败");
     } finally {
@@ -100,7 +115,7 @@ export function DnsCredentials({ user }: DnsCredentialsProps) {
   }, [load]);
 
   const handleAdd = () => {
-    setEditing({ ...EMPTY, id: dnsFailoverService.genId() });
+    setEditing({ ...EMPTY, id: cloudMode ? "" : dnsFailoverService.genId() });
   };
 
   const handleEdit = (cred: DnsCredential) => {
@@ -117,25 +132,32 @@ export function DnsCredentials({ user }: DnsCredentialsProps) {
       toast.error("请输入凭证名称");
       return;
     }
-    if (editing.provider === "dnspodCom" && !editing.token?.trim()) {
+    const isCloudExisting = cloudMode && !!editing.id;
+    if (!isCloudExisting && editing.provider === "dnspodCom" && !editing.token?.trim()) {
       toast.error("DNSPod.com 需要填写 Token（格式：ID,Token）");
       return;
     }
     if (
+      !isCloudExisting &&
       (editing.provider === "dnspodCn" || editing.provider === "aliyun") &&
       (!editing.secretId?.trim() || !editing.secretKey?.trim())
     ) {
       toast.error("请填写 SecretId/AccessKeyId 与 SecretKey/AccessKeySecret");
       return;
     }
-    if (editing.provider === "cloudflare" && !editing.apiToken?.trim()) {
+    if (!isCloudExisting && editing.provider === "cloudflare" && !editing.apiToken?.trim()) {
       toast.error("Cloudflare 需要填写 API Token");
       return;
     }
     // 保存前先验证凭证有效性，连接不上则中止保存
     setVerifying(true);
     try {
-      await dnsFailoverService.verifyCredential(editing);
+      if (cloudMode && editing.id) {
+        await dnsFailoverCloudService.verifyCredential(editing);
+      } else if (cloudMode) {
+      } else if (!cloudMode) {
+        await dnsFailoverService.verifyCredential(editing);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "验证失败";
       toast.error(`凭证验证失败：${msg}`);
@@ -144,8 +166,16 @@ export function DnsCredentials({ user }: DnsCredentialsProps) {
     }
     setVerifying(false);
     try {
-      await dnsFailoverService.saveCredential(user.username, editing);
+      if (cloudMode) {
+        await dnsFailoverCloudService.saveCredential(editing);
+      } else {
+        await dnsFailoverService.saveCredential(user.username, editing);
+      }
       toast.success("凭证已保存");
+      // DNS 凭证保存（API 成功 + 凭证验证通过 = 真实结果）
+      reportUsageIfLoggedIn("dns_credential_save", {
+        provider: editing.provider,
+      });
       setEditing(null);
       load();
     } catch (e) {
@@ -166,8 +196,16 @@ export function DnsCredentials({ user }: DnsCredentialsProps) {
     });
     if (!ok) return;
     try {
-      await dnsFailoverService.deleteCredential(user.username, cred.id);
+      if (cloudMode) {
+        await dnsFailoverCloudService.deleteCredential(cred.id);
+      } else {
+        await dnsFailoverService.deleteCredential(user.username, cred.id);
+      }
       toast.success("已删除");
+      // DNS 凭证删除（API 成功 = 真实结果）
+      reportUsageIfLoggedIn("dns_credential_delete", {
+        provider: cred.provider,
+      });
       load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "删除失败");

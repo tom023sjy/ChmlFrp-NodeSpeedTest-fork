@@ -8,11 +8,12 @@ use chrono::{Local, NaiveTime};
 use local_ip_address::list_afinet_netifas;
 use tauri::{Emitter, Manager};
 
+use super::ddns_task::{
+    self, append_log, format_local_time, parse_local_time, CredentialSource, DdnsLog, DdnsTask,
+    ScheduleMode,
+};
 use super::dns_config::{self, UserTokenState};
 use super::dns_provider::{self, DnsCredential, DnsProviderKind};
-use super::ddns_task::{
-    self, append_log, format_local_time, parse_local_time, CredentialSource, DdnsLog, DdnsTask, ScheduleMode,
-};
 
 /// 调度器基础 tick（秒）
 const SCHEDULER_TICK_SECS: u64 = 10;
@@ -23,8 +24,12 @@ const SCHEDULE_MATCH_WINDOW_SECS: i64 = 30;
 pub fn start_monitor(app_handle: tauri::AppHandle) {
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
-        log::info!("[DDNS] 动态解析调度器启动，基础 tick {}s", SCHEDULER_TICK_SECS);
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(SCHEDULER_TICK_SECS));
+        log::info!(
+            "[DDNS] 动态解析调度器启动，基础 tick {}s",
+            SCHEDULER_TICK_SECS
+        );
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(SCHEDULER_TICK_SECS));
         interval.tick().await; // 跳过首次立即触发
         loop {
             interval.tick().await;
@@ -53,17 +58,20 @@ async fn run_once(app_handle: &tauri::AppHandle) -> Result<(), String> {
             Err(e) => {
                 task.last_check = Some(format_local_time(now));
                 task.last_message = Some(format!("错误: {}", e));
-                append_log(app_handle, DdnsLog {
-                    time: String::new(),
-                    task_id: task.id.clone(),
-                    task_name: task.name.clone(),
-                    action: "error".to_string(),
-                    detected_ip: None,
-                    previous_ip: task.last_ip.clone(),
-                    updated_ip: None,
-                    message: e.clone(),
-                    owner_username: task.owner_username.clone(),
-                });
+                append_log(
+                    app_handle,
+                    DdnsLog {
+                        time: String::new(),
+                        task_id: task.id.clone(),
+                        task_name: task.name.clone(),
+                        action: "error".to_string(),
+                        detected_ip: None,
+                        previous_ip: task.last_ip.clone(),
+                        updated_ip: None,
+                        message: e.clone(),
+                        owner_username: task.owner_username.clone(),
+                    },
+                );
                 log::warn!("[DDNS] 任务 {} 检查失败: {}", task.name, e);
             }
         }
@@ -93,7 +101,10 @@ fn should_check(task: &DdnsTask, now: &chrono::DateTime<Local>) -> bool {
             }
             true
         }
-        ScheduleMode::Intervals { intervals, fallback_interval_secs } => {
+        ScheduleMode::Intervals {
+            intervals,
+            fallback_interval_secs,
+        } => {
             let interval_secs = match find_current_interval(intervals, now) {
                 Some(ti) => ti.interval_secs,
                 None => *fallback_interval_secs,
@@ -110,7 +121,10 @@ fn should_check(task: &DdnsTask, now: &chrono::DateTime<Local>) -> bool {
 }
 
 /// 在时间段列表中查找当前时间所在的时间段
-fn find_current_interval<'a>(intervals: &'a [super::ddns_task::TimeInterval], now: &chrono::DateTime<Local>) -> Option<&'a super::ddns_task::TimeInterval> {
+fn find_current_interval<'a>(
+    intervals: &'a [super::ddns_task::TimeInterval],
+    now: &chrono::DateTime<Local>,
+) -> Option<&'a super::ddns_task::TimeInterval> {
     let now_time = now.time();
     for ti in intervals {
         if let (Ok(start), Ok(end)) = (parse_hm(&ti.start), parse_hm(&ti.end)) {
@@ -153,7 +167,10 @@ fn get_interface_ip(interface: &str, record_type: &str) -> Result<String, String
                 return Ok(ip.to_string());
             }
         }
-        return Err(format!("未找到非回环的 {} 网卡", if want_v6 { "IPv6" } else { "IPv4" }));
+        return Err(format!(
+            "未找到非回环的 {} 网卡",
+            if want_v6 { "IPv6" } else { "IPv4" }
+        ));
     }
 
     for (name, ip) in ifaces.iter() {
@@ -167,7 +184,11 @@ fn get_interface_ip(interface: &str, record_type: &str) -> Result<String, String
             return Ok(ip.to_string());
         }
     }
-    Err(format!("网卡 {} 上未找到可用 {} 地址", interface, if want_v6 { "IPv6" } else { "IPv4" }))
+    Err(format!(
+        "网卡 {} 上未找到可用 {} 地址",
+        interface,
+        if want_v6 { "IPv6" } else { "IPv4" }
+    ))
 }
 
 /// 判断 IPv6 是否为链路本地地址（fe80::/10）
@@ -208,7 +229,10 @@ pub struct NetworkInterfaceInfo {
 }
 
 /// 执行单次检查并按需更新
-async fn check_and_update(app_handle: &tauri::AppHandle, task: &mut DdnsTask) -> Result<(), String> {
+async fn check_and_update(
+    app_handle: &tauri::AppHandle,
+    task: &mut DdnsTask,
+) -> Result<(), String> {
     let now = Local::now();
     let detected_ip = get_interface_ip(&task.interface, &task.record_type)?;
     let previous_ip = task.last_ip.clone();
@@ -220,17 +244,20 @@ async fn check_and_update(app_handle: &tauri::AppHandle, task: &mut DdnsTask) ->
     if let Some(prev) = previous_ip.as_ref() {
         if prev == &detected_ip {
             task.last_message = Some(format!("IP 未变化: {}", detected_ip));
-            append_log(app_handle, DdnsLog {
-                time: String::new(),
-                task_id: task.id.clone(),
-                task_name: task.name.clone(),
-                action: "check".to_string(),
-                detected_ip: Some(detected_ip.clone()),
-                previous_ip: previous_ip.clone(),
-                updated_ip: None,
-                message: "IP 未变化".to_string(),
-                owner_username: task.owner_username.clone(),
-            });
+            append_log(
+                app_handle,
+                DdnsLog {
+                    time: String::new(),
+                    task_id: task.id.clone(),
+                    task_name: task.name.clone(),
+                    action: "check".to_string(),
+                    detected_ip: Some(detected_ip.clone()),
+                    previous_ip: previous_ip.clone(),
+                    updated_ip: None,
+                    message: "IP 未变化".to_string(),
+                    owner_username: task.owner_username.clone(),
+                },
+            );
             return Ok(());
         }
     }
@@ -246,24 +273,47 @@ async fn check_and_update(app_handle: &tauri::AppHandle, task: &mut DdnsTask) ->
         }
     };
 
-    dns_provider::upsert_record(&cred, &task.domain, &task.record, &task.record_type, &detected_ip).await?;
+    dns_provider::upsert_record(
+        &cred,
+        &task.domain,
+        &task.record,
+        &task.record_type,
+        &detected_ip,
+    )
+    .await?;
 
     task.last_updated_ip = Some(detected_ip.clone());
-    task.last_message = Some(format!("IP 更新成功: {} -> {}", previous_ip.as_deref().unwrap_or("无"), detected_ip));
+    task.last_message = Some(format!(
+        "IP 更新成功: {} -> {}",
+        previous_ip.as_deref().unwrap_or("无"),
+        detected_ip
+    ));
 
-    append_log(app_handle, DdnsLog {
-        time: String::new(),
-        task_id: task.id.clone(),
-        task_name: task.name.clone(),
-        action: "update".to_string(),
-        detected_ip: Some(detected_ip.clone()),
-        previous_ip: previous_ip.clone(),
-        updated_ip: Some(detected_ip.clone()),
-        message: format!("{} -> {}", previous_ip.as_deref().unwrap_or("无"), detected_ip),
-        owner_username: task.owner_username.clone(),
-    });
+    append_log(
+        app_handle,
+        DdnsLog {
+            time: String::new(),
+            task_id: task.id.clone(),
+            task_name: task.name.clone(),
+            action: "update".to_string(),
+            detected_ip: Some(detected_ip.clone()),
+            previous_ip: previous_ip.clone(),
+            updated_ip: Some(detected_ip.clone()),
+            message: format!(
+                "{} -> {}",
+                previous_ip.as_deref().unwrap_or("无"),
+                detected_ip
+            ),
+            owner_username: task.owner_username.clone(),
+        },
+    );
 
-    log::info!("[DDNS] 任务 {} 更新成功: {} -> {}", task.name, previous_ip.as_deref().unwrap_or("无"), detected_ip);
+    log::info!(
+        "[DDNS] 任务 {} 更新成功: {} -> {}",
+        task.name,
+        previous_ip.as_deref().unwrap_or("无"),
+        detected_ip
+    );
     Ok(())
 }
 
@@ -276,7 +326,9 @@ fn find_dns_credential(
     let creds = dns_config::list_all_credentials(app_handle)?;
     creds
         .into_iter()
-        .find(|c| c.id == credential_id && (c.owner_username.is_empty() || c.owner_username == username))
+        .find(|c| {
+            c.id == credential_id && (c.owner_username.is_empty() || c.owner_username == username)
+        })
         .ok_or_else(|| format!("未找到凭证 {}", credential_id))
 }
 

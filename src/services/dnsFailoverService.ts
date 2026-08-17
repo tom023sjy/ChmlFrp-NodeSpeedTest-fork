@@ -22,6 +22,7 @@ export interface DnsCredential {
   secretKey?: string;
   /** DNSPod.com: 格式 "ID,Token" */
   token?: string;
+  tokenId?: string;
   /** Cloudflare: API Token */
   apiToken?: string;
   /** 凭证所属用户名（账号隔离用，由后端自动设置） */
@@ -29,10 +30,17 @@ export interface DnsCredential {
 }
 
 export interface TunnelTarget {
+  id?: string;
   tunnelName: string;
   cnameValue: string;
+  nodeHost?: string;
+  nodePort?: number;
   note?: string;
 }
+
+export type DnsExecutionTarget =
+  | { type: "cloud"; id: "xian-cloud" }
+  | { type: "device"; id: string };
 
 export interface DnsMonitorTask {
   id: string;
@@ -64,6 +72,11 @@ export interface DnsMonitorTask {
   tcpingTimeoutSecs: number;
   /** 任务所属用户名（账号隔离用，由后端自动设置） */
   ownerUsername?: string;
+  executionTarget?: DnsExecutionTarget;
+  revision?: number;
+  runtimeStatus?: string;
+  executorOnline?: boolean;
+  lastSyncAt?: string;
 }
 
 export interface TaskRuntime {
@@ -75,6 +88,9 @@ export interface TaskRuntime {
   lastResult: string;
   /** 下次应检查的 unix 时间戳（0 表示立即检查） */
   nextCheckAt: number;
+  status?: string;
+  executorOnline?: boolean;
+  lastSyncAt?: string;
 }
 
 export interface DnsSwitchLog {

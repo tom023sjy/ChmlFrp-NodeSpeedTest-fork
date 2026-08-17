@@ -9,7 +9,7 @@ interface BatchTestFloatingWidgetProps {
 }
 
 export function BatchTestFloatingWidget({ onExpand, isDialogOpen }: BatchTestFloatingWidgetProps) {
-  const [state, setState] = useState<BatchTestState>(() => getBatchTestState());
+  const [state, setState] = useState<BatchTestState>(() => ({ ...getBatchTestState() }));
   const [position, setPosition] = useState<{ left: number; top: number }>(() => ({
     left: typeof window !== "undefined" ? window.innerWidth - 296 : 0,
     top: typeof window !== "undefined" ? window.innerHeight - 150 : 0,
@@ -19,15 +19,10 @@ export function BatchTestFloatingWidget({ onExpand, isDialogOpen }: BatchTestFlo
 
   useEffect(() => {
     const unsubscribe = subscribeBatchTestState(() => {
-      setState(getBatchTestState());
+      setState({ ...getBatchTestState() });
     });
     return unsubscribe;
   }, []);
-
-  // isDialogOpen 变化时（如最小化/展开），主动刷新 state，确保 state.isRunning 是最新的
-  useEffect(() => {
-    setState(getBatchTestState());
-  }, [isDialogOpen]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("button")) return;

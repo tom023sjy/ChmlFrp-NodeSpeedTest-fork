@@ -1,9 +1,9 @@
 use crate::models::{FrpcProcesses, SpeedTestConfig};
-use crate::utils::{resolve_frpc_path, get_app_data_dir};
+use crate::utils::{get_app_data_dir, resolve_frpc_path};
+use log::{info, warn};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use tauri::State;
-use log::{info, warn};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -48,8 +48,8 @@ fn generate_config_file(
         config.remote_port
     );
 
-    let mut file = std::fs::File::create(&config_path)
-        .map_err(|e| format!("创建配置文件失败: {}", e))?;
+    let mut file =
+        std::fs::File::create(&config_path).map_err(|e| format!("创建配置文件失败: {}", e))?;
     file.write_all(config_content.as_bytes())
         .map_err(|e| format!("写入配置文件失败: {}", e))?;
 
@@ -176,10 +176,7 @@ pub async fn stop_all_frpc(processes: State<'_, FrpcProcesses>) -> Result<(), St
 }
 
 #[tauri::command]
-pub fn is_frpc_running(
-    tunnel_name: String,
-    processes: State<'_, FrpcProcesses>,
-) -> bool {
+pub fn is_frpc_running(tunnel_name: String, processes: State<'_, FrpcProcesses>) -> bool {
     if let Ok(procs) = processes.processes.lock() {
         procs.contains_key(&tunnel_name)
     } else {

@@ -11,26 +11,59 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { AlertCircle, CheckCircle2, Loader2, Info, AlertTriangle, Zap, Minimize2, SquareX, ShieldAlert, ExternalLink, RotateCcw } from "lucide-react";
-import { speedTestService, type SpeedTestProgress, type LogEntry } from "@/services/speedTestService";
+import type { LogEntry } from "@/services/speedTestService";
+import { runUnifiedNodeTest, type UnifiedTestResult } from "@/services/unifiedTestService";
+import { TestRunController } from "@/services/testRunController";
 import { invoke } from "@tauri-apps/api/core";
+import { reportUsage } from "@/services/backendApi";
+import { getStoredUser } from "@/services/api";
+import {
+  getStoredDurationSeconds,
+  setStoredDurationSeconds,
+} from "@/services/nodeTestPreferences";
+import {
+  resolveBatchTestCompletion,
+  shouldClearBatchTestArtifacts,
+} from "@/services/batchTestCompletion";
+import { calculateBatchOverallPercent } from "@/services/batchTestProgress";
+
+/** 根据发送端/接收端是否为本机，返回设备对类型，用于事件 eventData */
+function pairTypeOf(senderId: string, receiverId: string): string {
+  const s = senderId === "local" ? "local" : "remote";
+  const r = receiverId === "local" ? "local" : "remote";
+  return `${s}_to_${r}`;
+}
+
+/** 仅在用户已登录时上报使用量事件，失败静默不影响主流程 */
+function reportUsageIfLoggedIn(eventType: string, eventData?: Record<string, unknown>): void {
+  if (!getStoredUser()?.accessToken) return;
+  reportUsage({ eventType, eventData }).catch(() => {});
+}
 
 interface TestConfig {
   testLatency: boolean;
   testSpeed: boolean;
-  speedTestSize: number;
+  durationSeconds: number;
+  senderDeviceId: string;   // "local" 表示本机
+  senderDeviceName: string;
+  receiverDeviceId: string;  // "local" 表示本机
+  receiverDeviceName: string;
 }
 
-interface NodeResult {
+export interface NodeResult {
   nodeName: string;
   latency?: number;
   downloadSpeed?: number;
   error?: string;
   success: boolean;
+  details?: UnifiedTestResult;
+  logs: LogEntry[];
 }
 
 export interface BatchTestState {
   isRunning: boolean;
   isStopping: boolean;
+  preserveLogs: boolean;
   config: TestConfig;
   nodeNames: string[];
   progress: {
@@ -47,10 +80,11 @@ export interface BatchTestState {
   logs: LogEntry[];
 }
 
-let globalState: BatchTestState = {
+const globalState: BatchTestState = {
   isRunning: false,
   isStopping: false,
-  config: { testLatency: true, testSpeed: true, speedTestSize: 100 },
+  preserveLogs: false,
+  config: { testLatency: true, testSpeed: true, durationSeconds: getStoredDurationSeconds(localStorage), senderDeviceId: "local", senderDeviceName: "本机", receiverDeviceId: "local", receiverDeviceName: "本机" },
   nodeNames: [],
   progress: null,
   results: [],
@@ -97,20 +131,6 @@ export function requestCancelStopBatchTest(): void {
   }
 }
 
-const stageProgress: Record<string, number> = {
-  idle: 0,
-  checking_frpc: 5,
-  downloading_frpc: 15,
-  starting_tcp_server: 30,
-  creating_tunnel: 40,
-  starting_frpc: 50,
-  testing_latency: 70,
-  testing_speed: 85,
-  cleaning_up: 95,
-  completed: 100,
-  error: 0,
-};
-
 const stageLabels: Record<string, string> = {
   idle: "准备中",
   creating_tunnel: "创建隧道",
@@ -122,18 +142,6 @@ const stageLabels: Record<string, string> = {
   completed: "完成",
   error: "错误",
 };
-
-function calcNodeOverallPercent(stage: string, nodeProgress?: number): number {
-  const stageStart = stageProgress[stage as keyof typeof stageProgress] ?? 0;
-  const stageKeys = Object.keys(stageProgress);
-  const stageIndex = stageKeys.indexOf(stage);
-  const nextStageStart = stageIndex < stageKeys.length - 1 ? stageProgress[stageKeys[stageIndex + 1] as keyof typeof stageProgress] : 100;
-  const stageRange = nextStageStart - stageStart;
-  if (nodeProgress != null && nodeProgress > 0) {
-    return Math.min(100, stageStart + (nodeProgress / 100) * stageRange);
-  }
-  return stageStart;
-}
 
 function LogItem({ log }: { log: LogEntry }) {
   const getIcon = () => {
@@ -174,17 +182,19 @@ interface SpeedTestDialogProps {
   isOpen: boolean;
   onClose: (isMinimized?: boolean) => void;
   nodeNames: string[];
-  onTestComplete?: (results: Map<string, { latency?: number; downloadSpeed?: number; error?: string }>) => void;
+  /** 外部传入的设备对（发送端/接收端），由调用方在顶栏设置，弹窗内不再编辑 */
+  pair?: { senderId: string; senderName: string; receiverId: string; receiverName: string };
+  onTestComplete?: (results: Map<string, NodeResult>, pair: { senderId: string; receiverId: string; senderName: string; receiverName: string }, shouldShowLogs: boolean) => void;
 }
 
-export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: SpeedTestDialogProps) {
+export function SpeedTestDialog({ isOpen, onClose, nodeNames, pair, onTestComplete }: SpeedTestDialogProps) {
   const [config, setConfig] = useState<TestConfig>(globalState.config);
   const [isRunning, setIsRunning] = useState(false);
-  const [speedTestSizeInput, setSpeedTestSizeInput] = useState<string>(config.speedTestSize.toString());
+  const [durationSecondsInput, setDurationSecondsInput] = useState<string>(config.durationSeconds.toString());
   const [progress, setProgress] = useState<BatchTestState["progress"]>(null);
   const [results, setResults] = useState<NodeResult[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const stopRef = useRef(false);
+  const runControllerRef = useRef<TestRunController | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const onTestCompleteRef = useRef(onTestComplete);
 
@@ -201,7 +211,7 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
   useEffect(() => {
     if (isOpen) {
       // 打开对话框时，如果测试不在运行中，清除上次的日志和结果（全新开始）
-      if (!globalState.isRunning) {
+      if (shouldClearBatchTestArtifacts(globalState.isRunning, globalState.preserveLogs)) {
         globalState.logs = [];
         globalState.results = [];
         globalState.progress = null;
@@ -210,18 +220,30 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
       setResults(globalState.results);
       setLogs(globalState.logs);
       setIsRunning(globalState.isRunning);
+      // 同步外部传入的设备对到 config（发送端/接收端由顶栏设置，弹窗内不再编辑）
+      if (pair) {
+        globalState.config = {
+          ...globalState.config,
+          senderDeviceId: pair.senderId,
+          senderDeviceName: pair.senderName,
+          receiverDeviceId: pair.receiverId,
+          receiverDeviceName: pair.receiverName,
+        };
+      }
       setConfig(globalState.config);
-      stopRef.current = false;
-      setIsStopping(false);
-      setIsForceStopping(false);
+      if (!globalState.isRunning) {
+        runControllerRef.current = null;
+        setIsStopping(false);
+        setIsForceStopping(false);
+      }
       setIsMinimizing(false);
-      setSpeedTestSizeInput(globalState.config.speedTestSize.toString());
+      setDurationSecondsInput(globalState.config.durationSeconds.toString());
     }
-  }, [isOpen]);
+  }, [isOpen, pair]);
 
   useEffect(() => {
-    setSpeedTestSizeInput(config.speedTestSize.toString());
-  }, [config.speedTestSize]);
+    setDurationSecondsInput(config.durationSeconds.toString());
+  }, [config.durationSeconds]);
 
   const addLog = useCallback((message: string, type: LogEntry["type"] = "info") => {
     const entry: LogEntry = { timestamp: Date.now(), message, type };
@@ -238,6 +260,7 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
     globalState.config = config;
     globalState.isRunning = true;
     globalState.isStopping = false;
+    globalState.preserveLogs = false;
     globalState.results = [];
     globalState.logs = [];
     globalState.progress = null;
@@ -246,24 +269,35 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
     setIsRunning(true);
     setResults([]);
     setLogs([]);
-    stopRef.current = false;
+    const runController = new TestRunController(crypto.randomUUID());
+    runControllerRef.current = runController;
     setIsStopping(false);
+    setIsForceStopping(false);
 
     addLog(`开始测试，共 ${nodeNames.length} 个节点`, "info");
-    addLog(`配置: 延迟测试=${config.testLatency ? "是" : "否"}, 速度测试=${config.testSpeed ? "是" : "否"}${config.testSpeed ? `, 大小=${config.speedTestSize}MB` : ""}`, "info");
+    addLog(`配置: 延迟测试=${config.testLatency ? "是" : "否"}, 速度测试=${config.testSpeed ? "是" : "否"}${config.testSpeed ? `, 时长=${config.durationSeconds}秒` : ""}`, "info");
+
+    // 节点测试开始埋点：仅在用户已登录时上报
+    reportUsageIfLoggedIn("node_test_start", {
+      total_count: nodeNames.length,
+      test_latency: config.testLatency,
+      test_speed: config.testSpeed,
+      speed_duration_seconds: config.durationSeconds,
+      pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId),
+    });
 
     const newResults: NodeResult[] = [];
     const total = nodeNames.length;
+    const batchStart = Date.now();
 
     for (let i = 0; i < nodeNames.length; i++) {
-      if (stopRef.current) {
-        addLog("用户取消了测试", "warning");
+      if (runController.shouldStopBatch()) {
         break;
       }
 
       const nodeName = nodeNames[i];
-      const nodeOverallPct = calcNodeOverallPercent("idle");
-      const overallPercent = ((i + nodeOverallPct / 100) / total) * 100;
+      const nodeLogStart = globalState.logs.length;
+      const overallPercent = calculateBatchOverallPercent(i, total, 0);
       const nodeProgress = { current: i + 1, total, currentNodeName: nodeName, stage: "准备中", rawStage: "idle", overallPercent };
       globalState.progress = nodeProgress;
       setProgress(nodeProgress);
@@ -271,60 +305,110 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
 
       addLog(`[${i + 1}/${total}] 开始测试节点: ${nodeName}`, "info");
 
+      const nodeStart = Date.now();
       try {
-        const result = await speedTestService.runSpeedTest(
+        const result: UnifiedTestResult = await runUnifiedNodeTest({
+          runId: runController.runId,
+          signal: runController.signal,
+          senderDeviceId: config.senderDeviceId,
+          senderDeviceName: config.senderDeviceName,
+          receiverDeviceId: config.receiverDeviceId,
+          receiverDeviceName: config.receiverDeviceName,
           nodeName,
-          (p: SpeedTestProgress) => {
-            const stageLabel = stageLabels[p.stage] || p.stage;
-            const nodeOverallPct = calcNodeOverallPercent(p.stage, p.progress);
+          testLatency: config.testLatency,
+          testSpeed: config.testSpeed,
+          durationSeconds: config.durationSeconds,
+          onLog: (msg, level) => addLog(msg, level),
+          onProgress: (stage, progress, message) => {
+            const stageLabel = stageLabels[stage as keyof typeof stageLabels] || stage;
             const completedNodes = i;
-            const overallPercent = ((completedNodes + nodeOverallPct / 100) / total) * 100;
+            const overallPercent = calculateBatchOverallPercent(completedNodes, total, progress);
             const progressData = {
               current: i + 1,
               total,
               currentNodeName: nodeName,
               stage: stageLabel,
-              rawStage: p.stage,
-              nodeProgress: p.progress,
-              nodeMessage: p.message,
+              rawStage: stage,
+              nodeProgress: progress,
+              nodeMessage: message,
               overallPercent,
             };
             globalState.progress = progressData;
             setProgress(progressData);
             notifyListeners();
           },
-          {
-            testLatency: config.testLatency,
-            testSpeed: config.testSpeed,
-            speedTestSize: config.speedTestSize,
-          }
-        );
+          events: {
+            onTunnelCreateSuccess: (durationMs) => reportUsageIfLoggedIn("tunnel_create_success", { duration_ms: durationMs, pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId) }),
+            onTunnelCreateFailure: (durationMs, errorCode) => reportUsageIfLoggedIn("tunnel_create_failure", { duration_ms: durationMs, error_code: errorCode, pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId) }),
+            onFrpcStartSuccess: (durationMs) => reportUsageIfLoggedIn("frpc_start_success", { duration_ms: durationMs, pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId) }),
+            onFrpcStartFailure: (durationMs, errorType, errorCode) => reportUsageIfLoggedIn("frpc_start_failure", { duration_ms: durationMs, error_type: errorType, error_code: errorCode, pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId) }),
+            onLatencyTestSuccess: (latencyMs, durationMs) => reportUsageIfLoggedIn("latency_test_success", { latency_ms: latencyMs, duration_ms: durationMs, pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId) }),
+            onLatencyTestFailure: (durationMs) => reportUsageIfLoggedIn("latency_test_failure", { duration_ms: durationMs, pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId) }),
+            onSpeedTestSuccess: (speedMbps, durationSeconds, durationMs) => reportUsageIfLoggedIn("speed_test_success", { speed_mbps: speedMbps, duration_seconds: durationSeconds, duration_ms: durationMs, pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId) }),
+            onSpeedTestFailure: (durationSeconds, durationMs) => reportUsageIfLoggedIn("speed_test_failure", { duration_seconds: durationSeconds, duration_ms: durationMs, pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId) }),
+          },
+        });
 
-        if (result.success) {
+        if (runController.isForceStopping()) {
+          addLog(
+            result.cleanupError
+              ? `[${i + 1}/${total}] ${nodeName} 已中止，但资源回收失败: ${result.cleanupError}`
+              : `[${i + 1}/${total}] ${nodeName} 已中止，资源回收完成`,
+            result.cleanupError ? "error" : "warning",
+          );
+          break;
+        }
+
+        const nodeDuration = Date.now() - nodeStart;
+        if (!result.error) {
           const nodeResult: NodeResult = {
             nodeName,
-            latency: result.latency,
-            downloadSpeed: result.downloadSpeed,
+            latency: result.latency ?? undefined,
+            downloadSpeed: result.downloadSpeed ?? undefined,
             success: true,
+            details: result,
+            logs: [],
           };
           newResults.push(nodeResult);
 
           const latencyStr = result.latency != null ? `${result.latency.toFixed(0)}ms` : "-";
           const speedStr = result.downloadSpeed != null ? `${result.downloadSpeed.toFixed(2)}Mbps` : "-";
           addLog(`[${i + 1}/${total}] ${nodeName} 完成 - 延迟: ${latencyStr}, 速度: ${speedStr}`, "success");
+
+          // 单节点测试成功埋点
+          reportUsageIfLoggedIn("node_test_node_success", {
+            test_latency: config.testLatency,
+            test_speed: config.testSpeed,
+            latency_ms: result.latency ?? null,
+            download_mbps: result.downloadSpeed ?? null,
+            duration_ms: nodeDuration,
+            pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId),
+          });
         } else {
           const nodeResult: NodeResult = {
             nodeName,
             error: result.error,
             success: false,
+            details: result,
+            logs: [],
           };
           newResults.push(nodeResult);
           addLog(`[${i + 1}/${total}] ${nodeName} 失败: ${result.error}`, "error");
 
-          // 检测到 Windows Defender 拦截 frpc：立即停止整个测速流程并弹窗提示
+          // 单节点测试失败埋点
+          reportUsageIfLoggedIn("node_test_node_failure", {
+            error_type: result.errorType ?? "generic",
+            duration_ms: nodeDuration,
+            pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId),
+          });
+
+          // Windows Defender 拦截 frpc：作为可靠的安全软件拦截事件上报
           if (result.errorType === "defender_blocked") {
+            reportUsageIfLoggedIn("speed_test_defender_blocked", {
+              pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId),
+            });
             addLog("检测到 Windows Defender 实时保护拦截，已自动停止测速", "warning");
-            stopRef.current = true;
+            runController.requestStop();
             setIsStopping(true);
             globalState.isStopping = true;
             globalState.results = [...newResults];
@@ -336,17 +420,32 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
         }
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : "测试失败";
+        if (runController.isForceStopping()) {
+          addLog(`[${i + 1}/${total}] ${nodeName} 已中止，资源回收完成`, "warning");
+          break;
+        }
         const nodeResult: NodeResult = {
           nodeName,
           error: errorMsg,
           success: false,
+          logs: [],
         };
         newResults.push(nodeResult);
         addLog(`[${i + 1}/${total}] ${nodeName} 异常: ${errorMsg}`, "error");
 
+        // 异常路径单节点失败埋点
+        reportUsageIfLoggedIn("node_test_node_failure", {
+          error_type: "generic",
+          duration_ms: Date.now() - nodeStart,
+          pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId),
+        });
+
         // 异常路径也检测 Defender 拦截特征（invoke 抛错时）
         if (/os error 225|0x800700e1|病毒|垃圾软件|file contains a virus|potentially unwanted software/i.test(errorMsg)) {
-          stopRef.current = true;
+          reportUsageIfLoggedIn("speed_test_defender_blocked", {
+            pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId),
+          });
+          runController.requestStop();
           setIsStopping(true);
           globalState.isStopping = true;
           globalState.results = [...newResults];
@@ -357,39 +456,71 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
         }
       }
 
+      const completedResult = newResults.at(-1);
+      if (completedResult?.nodeName === nodeName) {
+        completedResult.logs = globalState.logs.slice(nodeLogStart);
+      }
+
       globalState.results = [...newResults];
       setResults([...newResults]);
       notifyListeners();
     }
 
+    const successCount = newResults.filter(r => r.success).length;
+    const stopped = runController.shouldStopBatch();
+    const forceStopped = runController.isForceStopping();
+    const completion = resolveBatchTestCompletion(total, successCount, stopped, forceStopped);
+    if (forceStopped) {
+      addLog(`测试已强制停止: 已完成 ${newResults.length}/${total} 个节点，${successCount} 成功`, "warning");
+    } else if (stopped) {
+      addLog(`测试已停止: 已完成 ${newResults.length}/${total} 个节点，${successCount} 成功`, "warning");
+    } else {
+      addLog(`测试完成: ${successCount}/${total} 成功`, completion.allSucceeded ? "success" : "warning");
+    }
+
     globalState.isRunning = false;
     globalState.isStopping = false;
+    globalState.preserveLogs = completion.shouldShowLogs;
     globalState.progress = null;
+    globalState.results = [...newResults];
     setIsRunning(false);
     setProgress(null);
     setIsStopping(false);
     setIsForceStopping(false);
+    setResults([...newResults]);
     notifyListeners();
 
     if (onTestCompleteRef.current) {
-      const resultMap = new Map<string, { latency?: number; downloadSpeed?: number; error?: string }>();
+      const resultMap = new Map<string, NodeResult>();
       newResults.forEach(r => {
-        resultMap.set(r.nodeName, {
-          latency: r.latency,
-          downloadSpeed: r.downloadSpeed,
-          error: r.error,
-        });
+        resultMap.set(r.nodeName, r);
       });
-      onTestCompleteRef.current(resultMap);
+      try {
+        onTestCompleteRef.current(resultMap, {
+          senderId: config.senderDeviceId,
+          receiverId: config.receiverDeviceId,
+          senderName: config.senderDeviceName,
+          receiverName: config.receiverDeviceName,
+        }, completion.shouldShowLogs);
+      } catch {
+        addLog("测速结果保存失败，请保留日志后重试", "error");
+        onClose(true);
+      }
     }
 
-    const successCount = newResults.filter(r => r.success).length;
-    if (stopRef.current) {
-      addLog(`测试已停止: 已完成 ${newResults.length}/${total} 个节点，${successCount} 成功`, "warning");
-    } else {
-      addLog(`测试完成: ${successCount}/${total} 成功`, successCount === total ? "success" : "warning");
-    }
-  }, [nodeNames, config, addLog]);
+    // 节点测试完成埋点：统计整批结果，仅在用户已登录时上报
+    reportUsageIfLoggedIn("node_test_complete", {
+      total_count: total,
+      success_count: successCount,
+      failure_count: newResults.length - successCount,
+      duration_ms: Date.now() - batchStart,
+      stopped_by_user: runController.shouldStopBatch(),
+      test_latency: config.testLatency,
+      test_speed: config.testSpeed,
+      speed_duration_seconds: config.durationSeconds,
+      pair_type: pairTypeOf(config.senderDeviceId, config.receiverDeviceId),
+    });
+  }, [nodeNames, config, addLog, onClose]);
 
   const [isMinimizing, setIsMinimizing] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -399,10 +530,9 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
   const [showDefenderDialog, setShowDefenderDialog] = useState(false);
 
   const handleStop = useCallback(() => {
-    if (stopRef.current) return; // 防止重复点击
-    // 只设置停止标志，不立即中断当前节点测试
-    // 当前节点测试完成后，循环将不再开始下一个节点的测试
-    stopRef.current = true;
+    const controller = runControllerRef.current;
+    if (!controller || controller.shouldStopBatch()) return;
+    controller.requestStop();
     setIsStopping(true);
     globalState.isStopping = true;
     notifyListeners();
@@ -410,7 +540,9 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
   }, [addLog]);
 
   const handleCancelStop = useCallback(() => {
-    stopRef.current = false;
+    const controller = runControllerRef.current;
+    if (!controller || controller.isForceStopping()) return;
+    controller.cancelStop();
     setIsStopping(false);
     globalState.isStopping = false;
     notifyListeners();
@@ -418,15 +550,14 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
   }, [addLog]);
 
   const handleForceStop = useCallback(() => {
-    // 强制停止：立即中断当前节点测试
-    stopRef.current = true;
+    const controller = runControllerRef.current;
+    if (!controller || controller.isForceStopping()) return;
+    controller.forceStop();
     setIsStopping(true);
     setIsForceStopping(true);
     globalState.isStopping = true;
     notifyListeners();
-    // 调用 speedTestService.cancel() 触发 abortController，中断当前正在进行的测试
-    speedTestService.cancel();
-    addLog("正在强制停止测试...", "warning");
+    addLog("正在强制停止测速并回收资源，请勿关闭弹窗...", "warning");
   }, [addLog]);
 
   // 注册全局停止处理器，供外部（如顶部停止按钮）调用
@@ -448,6 +579,7 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
   }, [handleCancelStop]);
 
   const handleClose = useCallback(() => {
+    if (isForceStopping) return;
     if (isRunning) {
       // 运行中点击：触发停止（等当前节点完成），不关闭对话框
       handleStop();
@@ -455,33 +587,41 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
     }
     // 非运行状态：清除日志后关闭
     globalState.logs = [];
+    globalState.preserveLogs = false;
     setLogs([]);
     onClose();
-  }, [isRunning, handleStop, onClose]);
+  }, [isForceStopping, isRunning, handleStop, onClose]);
 
   useEffect(() => {
     isMinimizingRef.current = isMinimizing;
   }, [isMinimizing]);
 
   const handleMinimize = useCallback(() => {
+    if (isForceStopping) return;
     isMinimizingRef.current = true;
     setIsMinimizing(true);
     onClose(true);
-  }, [onClose]);
+  }, [isForceStopping, onClose]);
 
   const handleOpenChange = useCallback((open: boolean) => {
-    if (!open && !isMinimizingRef.current) {
+    if (!open && !isMinimizingRef.current && !isForceStopping) {
+      if (isRunning) {
+        // 测速运行中点击弹窗外部：自动最小化（不停止测试）
+        handleMinimize();
+        return;
+      }
       handleClose();
     }
     if (open) {
       setIsMinimizing(false);
     }
-  }, [handleClose]);
+  }, [handleClose, handleMinimize, isRunning, isForceStopping]);
 
   const successCount = results.filter(r => r.success).length;
   const failCount = results.filter(r => !r.success).length;
 
   const renderConfigPanel = () => (
+    <>
     <div className="space-y-4 p-4 border rounded-lg bg-muted/30">
       <div className="space-y-3">
         <div className="flex items-center space-x-2">
@@ -513,26 +653,27 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
         {config.testSpeed && (
           <div className="flex items-center gap-2 pl-6">
             <label className="text-sm text-muted-foreground whitespace-nowrap">
-              测试大小:
+              测试时长:
             </label>
             <Input
               type="number"
-              min={1}
-              max={100000}
-              value={speedTestSizeInput}
+              min={5}
+              max={120}
+              value={durationSecondsInput}
               onChange={(e) =>
-                setSpeedTestSizeInput(e.target.value)
+                setDurationSecondsInput(e.target.value)
               }
               onBlur={(e) => {
                 const value = e.target.value;
-                const parsedValue = value === "" ? 100 : parseInt(value) || 100;
-                const finalValue = Math.max(1, Math.min(100000, parsedValue));
-                setConfig(prev => ({ ...prev, speedTestSize: finalValue }));
-                setSpeedTestSizeInput(finalValue.toString());
+                const parsedValue = value === "" ? 15 : parseInt(value) || 15;
+                const finalValue = Math.max(5, Math.min(120, parsedValue));
+                setConfig(prev => ({ ...prev, durationSeconds: finalValue }));
+                setStoredDurationSeconds(localStorage, finalValue);
+                setDurationSecondsInput(finalValue.toString());
               }}
               className="w-20 h-8"
             />
-            <span className="text-sm text-muted-foreground">MB</span>
+            <span className="text-sm text-muted-foreground">秒</span>
           </div>
         )}
       </div>
@@ -549,6 +690,7 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
         </div>
       </div>
     </div>
+    </>
   );
 
   const renderBatchRunning = () => {
@@ -619,6 +761,11 @@ export function SpeedTestDialog({ isOpen, onClose, nodeNames, onTestComplete }: 
           <DialogTitle className="flex items-center gap-2">
             <Zap className="w-5 h-5" />
             {nodeNames.length === 1 ? "节点测试" : "批量测试"}
+            {config.senderDeviceId !== "local" || config.receiverDeviceId !== "local" ? (
+              <span className="text-xs text-muted-foreground font-normal">
+                {config.senderDeviceName} → {config.receiverDeviceName}
+              </span>
+            ) : null}
           </DialogTitle>
           <DialogDescription>
             {nodeNames.length === 1 ? `节点: ${nodeNames[0]}` : `共 ${nodeNames.length} 个节点`}

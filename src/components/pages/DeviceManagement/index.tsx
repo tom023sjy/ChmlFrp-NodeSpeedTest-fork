@@ -20,8 +20,10 @@ import {
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "sonner";
 import type { StoredUser } from "@/services/api";
+import { getStoredUser } from "@/services/api";
+import { reportUsage } from "@/services/backendApi";
 import { useEffectType, getCardClassName } from "@/lib/useEffectType";
-import { getRelayClient } from "@/services/deviceRelay";
+import { getRelayClient, type RelayConnectionState } from "@/services/deviceRelay";
 import {
   listDevices,
   renameDevice,
@@ -35,6 +37,12 @@ interface DeviceManagementProps {
   user?: StoredUser | null;
 }
 
+/** 已登录时上报事件，失败静默处理 */
+function reportUsageIfLoggedIn(eventType: string, eventData?: Record<string, unknown>): void {
+  if (!getStoredUser()?.accessToken) return;
+  reportUsage({ eventType, eventData }).catch(() => {});
+}
+
 export function DeviceManagement({ user }: DeviceManagementProps) {
   const confirm = useConfirm();
   const effectType = useEffectType();
@@ -43,6 +51,7 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [relayState, setRelayState] = useState<RelayConnectionState>(() => getRelayClient().getConnectionState());
   // 选中的设备（进入远程控制台）
   const [selectedDevice, setSelectedDevice] = useState<DeviceInfo | null>(null);
 
@@ -53,17 +62,25 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
 
   // in-flight 守卫：防止高频轮询时请求重叠（上次未返回就发起下一次）
   const loadingRef = useRef(false);
+  // 统计去重：同一次挂载内仅首个非静默请求携带统计标记。
+  // StrictMode 开发模式会双执行挂载 effect（refs 跨模拟卸载保留），
+  // 防止"打开界面"被计为 2 次；真实卸载后 ref 重置，重进页面正常计数
+  const trackedViewRef = useRef(false);
   const load = useCallback(async (silent = false) => {
     if (!isLoggedIn) {
       setDevices([]);
       return;
     }
-    // 静默刷新时若已有请求在飞，跳过本次（避免 2 秒轮询堆积请求）
+    // 静默刷新时若已有请求在飞，跳过本次（避免 5 秒轮询堆积请求）
     if (silent && loadingRef.current) return;
     loadingRef.current = true;
     if (!silent) setLoading(true);
+    // 仅用户主动打开界面（非静默）且本次挂载未计过数时计入统计；
+    // 5 秒轮询与 relay 上下线事件的静默刷新不计数
+    const trackView = !silent && !trackedViewRef.current;
+    if (trackView) trackedViewRef.current = true;
     try {
-      setDevices(await listDevices());
+      setDevices(await listDevices({ trackView }));
     } catch (e) {
       // 静默刷新时不弹 toast，避免定时轮询频繁报错
       if (!silent) {
@@ -85,6 +102,7 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
     const relay = getRelayClient();
     setConnected(relay.isConnected());
     const unlistenConn = relay.onConnectionChange((c) => setConnected(c));
+    const unlistenState = relay.onConnectionStateChange(setRelayState);
     const unlistenOnline = relay.on("device_online", () => {
       void load(true);
     });
@@ -93,17 +111,18 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
     });
     return () => {
       unlistenConn();
+      unlistenState();
       unlistenOnline();
       unlistenOffline();
     };
   }, [load]);
 
-  // 定时轮询：每 2 秒静默刷新设备列表（补充 relay 事件，提高实时性）
+  // 定时轮询：每 5 秒静默刷新设备列表（补充 relay 事件，提高实时性）
   useEffect(() => {
     if (!isLoggedIn) return;
     const interval = setInterval(() => {
       void load(true);
-    }, 2_000);
+    }, 5_000);
     return () => clearInterval(interval);
   }, [isLoggedIn, load]);
 
@@ -129,9 +148,12 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
     try {
       await renameDevice(renaming.deviceId, name);
       toast.success("已重命名");
+      reportUsageIfLoggedIn("device_rename_success", { is_current: !!renaming.isCurrent });
       setRenaming(null);
       load();
     } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      reportUsageIfLoggedIn("device_rename_failure", { is_current: !!renaming.isCurrent, reason });
       toast.error(e instanceof Error ? e.message : "重命名失败");
     } finally {
       setRenamingLoading(false);
@@ -164,8 +186,11 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
     try {
       await unbindDevice(device.deviceId);
       toast.success("已解绑");
+      reportUsageIfLoggedIn("device_unbind_success", { is_current: !!device.isCurrent });
       load();
     } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      reportUsageIfLoggedIn("device_unbind_failure", { is_current: !!device.isCurrent, reason });
       toast.error(e instanceof Error ? e.message : "解绑失败");
     }
   };
@@ -214,7 +239,7 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
                   ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400"
                   : "border-border bg-muted/30 text-muted-foreground",
               )}
-              title={connected ? "中继已连接" : "中继未连接"}
+              title={relayState.message}
             >
               <span
                 className={cn(
@@ -222,10 +247,10 @@ export function DeviceManagement({ user }: DeviceManagementProps) {
                   connected ? "bg-emerald-500" : "bg-muted-foreground/50",
                 )}
               />
-              {connected ? "已连接" : "未连接"}
+              {connected ? "已连接" : relayState.message}
             </div>
           )}
-          {/* 设备列表每 2 秒自动刷新，无需手动刷新按钮 */}
+          {/* 设备列表每 5 秒自动刷新，无需手动刷新按钮 */}
         </div>
       </div>
 

@@ -210,3 +210,18 @@ export async function daemonGetUpdateSettings(deviceId: string): Promise<UpdateS
 export async function daemonSetAutoUpdate(deviceId: string, enabled: boolean): Promise<void> {
   await callRpc(deviceId, "daemon_set_auto_update", { enabled });
 }
+
+/**
+ * 远程重新授权：把新的 proxyToken 发送给 daemon
+ *
+ * daemon 校验令牌有效性后写入配置并自动用新令牌重连 relay，
+ * 期间设备会短暂离线（约 3-5 秒）。
+ * @param proxyToken 桌面端授权登录得到的新代理令牌
+ */
+export async function daemonUpdateProxyToken(
+  deviceId: string,
+  proxyToken: string,
+): Promise<void> {
+  // daemon 侧需要调后端 /auth/refresh 校验新令牌，放宽超时到 30 秒
+  await callRpc(deviceId, "update_proxy_token", { proxyToken }, 30_000);
+}

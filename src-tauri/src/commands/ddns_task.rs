@@ -251,10 +251,7 @@ pub async fn list_ddns_tasks(
         .query(params![username])
         .map_err(|e| format!("查询任务失败: {}", e))?;
     let mut tasks = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取任务失败: {}", e))?
-    {
+    while let Some(row) = rows.next().map_err(|e| format!("读取任务失败: {}", e))? {
         tasks.push(row_to_task(row)?);
     }
     Ok(tasks)
@@ -324,14 +321,9 @@ pub fn read_all_tasks(_app_handle: &AppHandle) -> Result<Vec<DdnsTask>, String> 
     let mut stmt = conn
         .prepare(&format!("SELECT {} FROM ddns_tasks", TASK_COLUMNS))
         .map_err(|e| format!("查询任务失败: {}", e))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询任务失败: {}", e))?;
+    let mut rows = stmt.query([]).map_err(|e| format!("查询任务失败: {}", e))?;
     let mut tasks = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取任务失败: {}", e))?
-    {
+    while let Some(row) = rows.next().map_err(|e| format!("读取任务失败: {}", e))? {
         tasks.push(row_to_task(row)?);
     }
     Ok(tasks)
@@ -366,10 +358,7 @@ pub async fn list_ddns_logs(
         .query(params![username, MAX_LOGS])
         .map_err(|e| format!("查询日志失败: {}", e))?;
     let mut logs = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取日志失败: {}", e))?
-    {
+    while let Some(row) = rows.next().map_err(|e| format!("读取日志失败: {}", e))? {
         logs.push(DdnsLog {
             time: get_col(row, "time")?,
             task_id: get_col(row, "task_id")?,
@@ -386,10 +375,7 @@ pub async fn list_ddns_logs(
 }
 
 #[tauri::command]
-pub async fn clear_ddns_logs(
-    _app_handle: AppHandle,
-    username: String,
-) -> Result<(), String> {
+pub async fn clear_ddns_logs(_app_handle: AppHandle, username: String) -> Result<(), String> {
     let conn = db::get_conn()?;
     // 仅删除当前用户的日志，保留其他用户的日志
     conn.execute(

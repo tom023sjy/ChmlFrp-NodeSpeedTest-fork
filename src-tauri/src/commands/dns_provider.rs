@@ -121,11 +121,21 @@ pub async fn upsert_record(
     value: &str,
 ) -> Result<(), String> {
     match cred.provider {
-        DnsProviderKind::DnspodCn => dnspod_cn::upsert_record(cred, domain, subdomain, record_type, value).await,
-        DnsProviderKind::DnspodCom => dnspod_com::upsert_record(cred, domain, subdomain, record_type, value).await,
-        DnsProviderKind::Aliyun => aliyun::upsert_record(cred, domain, subdomain, record_type, value).await,
-        DnsProviderKind::Cloudflare => cloudflare::upsert_record(cred, domain, subdomain, record_type, value).await,
-        DnsProviderKind::Chmlfrp => chmlfrp::upsert_record(cred, domain, subdomain, record_type, value).await,
+        DnsProviderKind::DnspodCn => {
+            dnspod_cn::upsert_record(cred, domain, subdomain, record_type, value).await
+        }
+        DnsProviderKind::DnspodCom => {
+            dnspod_com::upsert_record(cred, domain, subdomain, record_type, value).await
+        }
+        DnsProviderKind::Aliyun => {
+            aliyun::upsert_record(cred, domain, subdomain, record_type, value).await
+        }
+        DnsProviderKind::Cloudflare => {
+            cloudflare::upsert_record(cred, domain, subdomain, record_type, value).await
+        }
+        DnsProviderKind::Chmlfrp => {
+            chmlfrp::upsert_record(cred, domain, subdomain, record_type, value).await
+        }
     }
 }
 
@@ -140,11 +150,54 @@ pub async fn upsert_record_with_remarks(
     remarks: &str,
 ) -> Result<(), String> {
     match cred.provider {
-        DnsProviderKind::DnspodCn => dnspod_cn::upsert_record_with_remarks(cred, domain, subdomain, record_type, value, remarks).await,
-        DnsProviderKind::DnspodCom => dnspod_com::upsert_record_with_remarks(cred, domain, subdomain, record_type, value, remarks).await,
-        DnsProviderKind::Aliyun => aliyun::upsert_record_with_remarks(cred, domain, subdomain, record_type, value, remarks).await,
-        DnsProviderKind::Cloudflare => cloudflare::upsert_record_with_remarks(cred, domain, subdomain, record_type, value, remarks).await,
-        DnsProviderKind::Chmlfrp => chmlfrp::upsert_record_with_remarks(cred, domain, subdomain, record_type, value, remarks).await,
+        DnsProviderKind::DnspodCn => {
+            dnspod_cn::upsert_record_with_remarks(
+                cred,
+                domain,
+                subdomain,
+                record_type,
+                value,
+                remarks,
+            )
+            .await
+        }
+        DnsProviderKind::DnspodCom => {
+            dnspod_com::upsert_record_with_remarks(
+                cred,
+                domain,
+                subdomain,
+                record_type,
+                value,
+                remarks,
+            )
+            .await
+        }
+        DnsProviderKind::Aliyun => {
+            aliyun::upsert_record_with_remarks(cred, domain, subdomain, record_type, value, remarks)
+                .await
+        }
+        DnsProviderKind::Cloudflare => {
+            cloudflare::upsert_record_with_remarks(
+                cred,
+                domain,
+                subdomain,
+                record_type,
+                value,
+                remarks,
+            )
+            .await
+        }
+        DnsProviderKind::Chmlfrp => {
+            chmlfrp::upsert_record_with_remarks(
+                cred,
+                domain,
+                subdomain,
+                record_type,
+                value,
+                remarks,
+            )
+            .await
+        }
     }
 }
 
@@ -264,7 +317,10 @@ mod dnspod_cn {
             .map_err(|e| format!("DNSPod.cn 请求失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("DNSPod.cn HTTP {}: {}", status, body));
         }
@@ -274,7 +330,10 @@ mod dnspod_cn {
 
         let resp_err = value.get("Response").and_then(|r| r.get("Error"));
         if let Some(err) = resp_err {
-            let code = err.get("Code").and_then(|v| v.as_str()).unwrap_or("Unknown");
+            let code = err
+                .get("Code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown");
             let msg = err.get("Message").and_then(|v| v.as_str()).unwrap_or("");
             return Err(format!("DNSPod.cn 错误: {} - {}", code, msg));
         }
@@ -301,11 +360,31 @@ mod dnspod_cn {
         let records = list
             .into_iter()
             .map(|item| DnsRecord {
-                record_id: item.get("RecordId").and_then(|v| v.as_i64()).map(|i| i.to_string()).unwrap_or_default(),
-                record_type: item.get("Type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                name: item.get("Name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                value: item.get("Value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                line: item.get("Line").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                record_id: item
+                    .get("RecordId")
+                    .and_then(|v| v.as_i64())
+                    .map(|i| i.to_string())
+                    .unwrap_or_default(),
+                record_type: item
+                    .get("Type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                name: item
+                    .get("Name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                value: item
+                    .get("Value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                line: item
+                    .get("Line")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             })
             .collect();
         Ok(records)
@@ -362,7 +441,10 @@ mod dnspod_cn {
             if rec.record_type.eq_ignore_ascii_case(record_type) && rec.value == value {
                 return Ok(());
             }
-            let record_id: i64 = rec.record_id.parse().map_err(|_| "RecordId 解析失败".to_string())?;
+            let record_id: i64 = rec
+                .record_id
+                .parse()
+                .map_err(|_| "RecordId 解析失败".to_string())?;
             let payload = serde_json::json!({
                 "Domain": domain,
                 "RecordId": record_id,
@@ -401,7 +483,10 @@ mod dnspod_cn {
             if rec.record_type.eq_ignore_ascii_case(record_type) && rec.value == value {
                 return Ok(());
             }
-            let record_id: i64 = rec.record_id.parse().map_err(|_| "RecordId 解析失败".to_string())?;
+            let record_id: i64 = rec
+                .record_id
+                .parse()
+                .map_err(|_| "RecordId 解析失败".to_string())?;
             let payload = serde_json::json!({
                 "Domain": domain,
                 "RecordId": record_id,
@@ -449,7 +534,10 @@ mod dnspod_com {
             .map_err(|e| format!("DNSPod.com 请求失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("DNSPod.com HTTP {}: {}", status, body));
         }
@@ -457,9 +545,17 @@ mod dnspod_com {
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
 
-        let code = value.get("status").and_then(|s| s.get("code")).and_then(|c| c.as_i64()).unwrap_or(0);
+        let code = value
+            .get("status")
+            .and_then(|s| s.get("code"))
+            .and_then(|c| c.as_i64())
+            .unwrap_or(0);
         if code != 1 {
-            let msg = value.get("status").and_then(|s| s.get("message")).and_then(|m| m.as_str()).unwrap_or("");
+            let msg = value
+                .get("status")
+                .and_then(|s| s.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
             return Err(format!("DNSPod.com 错误: {} - {}", code, msg));
         }
         Ok(value)
@@ -475,15 +571,39 @@ mod dnspod_com {
             form.push(("sub_domain", sub.to_string()));
         }
         let resp = call(cred, "/Record.List", form).await?;
-        let list = resp.get("records").and_then(|l| l.as_array()).cloned().unwrap_or_default();
+        let list = resp
+            .get("records")
+            .and_then(|l| l.as_array())
+            .cloned()
+            .unwrap_or_default();
         let records = list
             .into_iter()
             .map(|item| DnsRecord {
-                record_id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                record_type: item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                name: item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                value: item.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                line: item.get("line").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                record_id: item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                record_type: item
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                name: item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                value: item
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                line: item
+                    .get("line")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             })
             .collect();
         Ok(records)
@@ -613,16 +733,14 @@ mod aliyun {
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
         let canonicalized: String = sorted
             .into_iter()
-            .map(|(k, v)| {
-                format!(
-                    "{}={}",
-                    percent_encode(&k),
-                    percent_encode(&v)
-                )
-            })
+            .map(|(k, v)| format!("{}={}", percent_encode(&k), percent_encode(&v)))
             .collect::<Vec<_>>()
             .join("&");
-        let string_to_sign = format!("GET&{}&{}", percent_encode("/"), percent_encode(&canonicalized));
+        let string_to_sign = format!(
+            "GET&{}&{}",
+            percent_encode("/"),
+            percent_encode(&canonicalized)
+        );
         let mut mac = HmacSha1::new_from_slice(format!("{}&", secret_key).as_bytes())
             .expect("HMAC-SHA1 初始化失败");
         mac.update(string_to_sign.as_bytes());
@@ -632,10 +750,35 @@ mod aliyun {
     fn percent_encode(s: &str) -> String {
         use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
         const RESERVED: &AsciiSet = &CONTROLS
-            .add(b' ').add(b'!').add(b'"').add(b'#').add(b'$').add(b'%').add(b'&').add(b'\'')
-            .add(b'(').add(b')').add(b'*').add(b'+').add(b',').add(b'/').add(b':').add(b';')
-            .add(b'<').add(b'=').add(b'>').add(b'?').add(b'@').add(b'[').add(b'\\').add(b']')
-            .add(b'^').add(b'`').add(b'{').add(b'|').add(b'}');
+            .add(b' ')
+            .add(b'!')
+            .add(b'"')
+            .add(b'#')
+            .add(b'$')
+            .add(b'%')
+            .add(b'&')
+            .add(b'\'')
+            .add(b'(')
+            .add(b')')
+            .add(b'*')
+            .add(b'+')
+            .add(b',')
+            .add(b'/')
+            .add(b':')
+            .add(b';')
+            .add(b'<')
+            .add(b'=')
+            .add(b'>')
+            .add(b'?')
+            .add(b'@')
+            .add(b'[')
+            .add(b'\\')
+            .add(b']')
+            .add(b'^')
+            .add(b'`')
+            .add(b'{')
+            .add(b'|')
+            .add(b'}');
         utf8_percent_encode(s, RESERVED).to_string()
     }
 
@@ -650,7 +793,10 @@ mod aliyun {
         params.push(("SignatureMethod".to_string(), "HMAC-SHA1".to_string()));
         params.push(("SignatureVersion".to_string(), "1.0".to_string()));
         params.push(("SignatureNonce".to_string(), uuid_v4()));
-        params.push(("Timestamp".to_string(), Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()));
+        params.push((
+            "Timestamp".to_string(),
+            Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        ));
         params.push(("Action".to_string(), action.to_string()));
 
         let signature = sign(&params, &cred.secret_key);
@@ -669,7 +815,10 @@ mod aliyun {
             .map_err(|e| format!("Aliyun 请求失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("Aliyun HTTP {}: {}", status, body));
         }
@@ -689,7 +838,10 @@ mod aliyun {
     fn uuid_v4() -> String {
         // 简易随机串作为 SignatureNonce
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         format!("{:x}", nanos)
     }
 
@@ -700,19 +852,48 @@ mod aliyun {
     ) -> Result<Vec<DnsRecord>, String> {
         let mut params = vec![("DomainName".to_string(), domain.to_string())];
         if let Some(sub) = subdomain {
-            let full = if sub.is_empty() { domain.to_string() } else { format!("{}.{}", sub, domain) };
+            let full = if sub.is_empty() {
+                domain.to_string()
+            } else {
+                format!("{}.{}", sub, domain)
+            };
             params.push(("RRKeyWord".to_string(), full));
         }
         let resp = call(cred, "DescribeDomainRecords", params).await?;
-        let list = resp.get("DomainRecords").and_then(|d| d.get("Record")).and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let list = resp
+            .get("DomainRecords")
+            .and_then(|d| d.get("Record"))
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
         let records = list
             .into_iter()
             .map(|item| DnsRecord {
-                record_id: item.get("RecordId").and_then(|v| v.as_i64()).map(|i| i.to_string()).unwrap_or_default(),
-                record_type: item.get("Type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                name: item.get("RR").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                value: item.get("Value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                line: item.get("Line").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                record_id: item
+                    .get("RecordId")
+                    .and_then(|v| v.as_i64())
+                    .map(|i| i.to_string())
+                    .unwrap_or_default(),
+                record_type: item
+                    .get("Type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                name: item
+                    .get("RR")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                value: item
+                    .get("Value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                line: item
+                    .get("Line")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             })
             .collect();
         Ok(records)
@@ -726,9 +907,17 @@ mod aliyun {
         value: &str,
     ) -> Result<(), String> {
         let records = list_records(cred, domain, Some(subdomain)).await?;
-        let target_full = if subdomain.is_empty() { domain.to_string() } else { format!("{}.{}", subdomain, domain) };
+        let target_full = if subdomain.is_empty() {
+            domain.to_string()
+        } else {
+            format!("{}.{}", subdomain, domain)
+        };
         let existing = records.into_iter().find(|r| {
-            let full = if r.name.is_empty() { domain.to_string() } else { format!("{}.{}", r.name, domain) };
+            let full = if r.name.is_empty() {
+                domain.to_string()
+            } else {
+                format!("{}.{}", r.name, domain)
+            };
             full == target_full
         });
 
@@ -765,9 +954,17 @@ mod aliyun {
         remarks: &str,
     ) -> Result<(), String> {
         let records = list_records(cred, domain, Some(subdomain)).await?;
-        let target_full = if subdomain.is_empty() { domain.to_string() } else { format!("{}.{}", subdomain, domain) };
+        let target_full = if subdomain.is_empty() {
+            domain.to_string()
+        } else {
+            format!("{}.{}", subdomain, domain)
+        };
         let existing = records.into_iter().find(|r| {
-            let full = if r.name.is_empty() { domain.to_string() } else { format!("{}.{}", r.name, domain) };
+            let full = if r.name.is_empty() {
+                domain.to_string()
+            } else {
+                format!("{}.{}", r.name, domain)
+            };
             full == target_full
         });
 
@@ -812,7 +1009,11 @@ mod aliyun {
             .ok_or("DescribeDomains 返回格式异常")?;
         Ok(arr
             .iter()
-            .filter_map(|d| d.get("DomainName").and_then(|n| n.as_str()).map(String::from))
+            .filter_map(|d| {
+                d.get("DomainName")
+                    .and_then(|n| n.as_str())
+                    .map(String::from)
+            })
             .collect())
     }
 
@@ -847,7 +1048,10 @@ mod cloudflare {
             .map_err(|e| format!("Cloudflare 查询 Zone 失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("Cloudflare HTTP {}: {}", status, body));
         }
@@ -855,7 +1059,11 @@ mod cloudflare {
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
 
-        if !value.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !value
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let msg = value
                 .get("errors")
                 .and_then(|e| e.get(0))
@@ -896,7 +1104,10 @@ mod cloudflare {
             .map_err(|e| format!("Cloudflare 查询记录失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("Cloudflare HTTP {}: {}", status, body));
         }
@@ -904,7 +1115,11 @@ mod cloudflare {
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
 
-        if !value.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !value
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let msg = value
                 .get("errors")
                 .and_then(|e| e.get(0))
@@ -914,11 +1129,19 @@ mod cloudflare {
             return Err(format!("Cloudflare 错误: {}", msg));
         }
 
-        let list = value.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let list = value
+            .get("result")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
         let records = list
             .into_iter()
             .map(|item| {
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 // Cloudflare 返回的 name 是完整域名（subdomain.example.com）
                 // 截取为子域名前缀，便于上层统一处理
                 let sub = if name == domain {
@@ -929,10 +1152,22 @@ mod cloudflare {
                     name.clone()
                 };
                 DnsRecord {
-                    record_id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    record_type: item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    record_id: item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    record_type: item
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     name: sub,
-                    value: item.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    value: item
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     line: String::new(),
                 }
             })
@@ -960,7 +1195,11 @@ mod cloudflare {
 
         // CNAME 记录值需以点结尾（FQDN），A/AAAA 直接使用 IP
         let normalized_value = if record_type.eq_ignore_ascii_case("CNAME") {
-            if value.ends_with('.') { value.to_string() } else { format!("{}.", value) }
+            if value.ends_with('.') {
+                value.to_string()
+            } else {
+                format!("{}.", value)
+            }
         } else {
             value.to_string()
         };
@@ -972,7 +1211,10 @@ mod cloudflare {
                 return Ok(());
             }
             let resp = http_client()?
-                .put(format!("{}/zones/{}/dns_records/{}", API_BASE, zone_id, rec.record_id))
+                .put(format!(
+                    "{}/zones/{}/dns_records/{}",
+                    API_BASE, zone_id, rec.record_id
+                ))
                 .header("Authorization", format!("Bearer {}", cred.api_token))
                 .json(&serde_json::json!({
                     "type": record_type,
@@ -985,7 +1227,10 @@ mod cloudflare {
                 .map_err(|e| format!("Cloudflare 更新记录失败: {}", e))?;
 
             let status = resp.status();
-            let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| format!("读取响应失败: {}", e))?;
             if !status.is_success() {
                 return Err(format!("Cloudflare HTTP {}: {}", status, body));
             }
@@ -1015,7 +1260,10 @@ mod cloudflare {
                 .map_err(|e| format!("Cloudflare 创建记录失败: {}", e))?;
 
             let status = resp.status();
-            let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| format!("读取响应失败: {}", e))?;
             if !status.is_success() {
                 return Err(format!("Cloudflare HTTP {}: {}", status, body));
             }
@@ -1053,7 +1301,11 @@ mod cloudflare {
             format!("{}.{}", subdomain, domain)
         };
         let normalized_value = if record_type.eq_ignore_ascii_case("CNAME") {
-            if value.ends_with('.') { value.to_string() } else { format!("{}.", value) }
+            if value.ends_with('.') {
+                value.to_string()
+            } else {
+                format!("{}.", value)
+            }
         } else {
             value.to_string()
         };
@@ -1065,7 +1317,10 @@ mod cloudflare {
                 return Ok(());
             }
             let resp = http_client()?
-                .put(format!("{}/zones/{}/dns_records/{}", API_BASE, zone_id, rec.record_id))
+                .put(format!(
+                    "{}/zones/{}/dns_records/{}",
+                    API_BASE, zone_id, rec.record_id
+                ))
                 .header("Authorization", format!("Bearer {}", cred.api_token))
                 .json(&serde_json::json!({
                     "type": record_type,
@@ -1079,7 +1334,10 @@ mod cloudflare {
                 .map_err(|e| format!("Cloudflare 更新记录失败: {}", e))?;
 
             let status = resp.status();
-            let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| format!("读取响应失败: {}", e))?;
             if !status.is_success() {
                 return Err(format!("Cloudflare HTTP {}: {}", status, body));
             }
@@ -1110,7 +1368,10 @@ mod cloudflare {
                 .map_err(|e| format!("Cloudflare 创建记录失败: {}", e))?;
 
             let status = resp.status();
-            let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| format!("读取响应失败: {}", e))?;
             if !status.is_success() {
                 return Err(format!("Cloudflare HTTP {}: {}", status, body));
             }
@@ -1139,7 +1400,10 @@ mod cloudflare {
             .map_err(|e| format!("Cloudflare 验证失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("Cloudflare HTTP {}: {}", status, body));
         }
@@ -1147,7 +1411,11 @@ mod cloudflare {
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
 
-        if !value.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !value
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let msg = value
                 .get("errors")
                 .and_then(|e| e.get(0))
@@ -1169,7 +1437,10 @@ mod cloudflare {
             .map_err(|e| format!("Cloudflare 列出域名失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("Cloudflare HTTP {}: {}", status, body));
         }
@@ -1177,7 +1448,11 @@ mod cloudflare {
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
 
-        if !value.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !value
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let msg = value
                 .get("errors")
                 .and_then(|e| e.get(0))
@@ -1215,7 +1490,10 @@ mod cloudflare {
             .map_err(|e| format!("Cloudflare 删除记录失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("Cloudflare HTTP {}: {}", status, body));
         }
@@ -1273,7 +1551,10 @@ pub mod chmlfrp {
     fn check_code(value: &serde_json::Value, label: &str) -> Result<(), String> {
         let code = value.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
         if code != 200 {
-            let msg = value.get("msg").and_then(|m| m.as_str()).unwrap_or("未知错误");
+            let msg = value
+                .get("msg")
+                .and_then(|m| m.as_str())
+                .unwrap_or("未知错误");
             return Err(format!("{} 错误: {} - {}", label, code, msg));
         }
         Ok(())
@@ -1288,7 +1569,10 @@ pub mod chmlfrp {
             .map_err(|e| format!("ChmlFrp 获取可用域名列表失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("ChmlFrp HTTP {}: {}", status, body));
         }
@@ -1297,19 +1581,34 @@ pub mod chmlfrp {
             .map_err(|e| format!("解析响应失败: {} (body: {})", e, body))?;
         check_code(&value, "获取可用域名列表")?;
 
-        let list = value.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
+        let list = value
+            .get("data")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
         let domains = list
             .into_iter()
             .map(|item| ChmlfrpAvailableDomain {
                 id: item.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
-                domain: item.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                domain: item
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 remarks: item
                     .get("remarks")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                icp_filing: item.get("icpFiling").and_then(|v| v.as_bool()).unwrap_or(false),
-                state: item.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                icp_filing: item
+                    .get("icpFiling")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                state: item
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             })
             .collect();
         Ok(domains)
@@ -1328,7 +1627,10 @@ pub mod chmlfrp {
             .map_err(|e| format!("ChmlFrp 获取用户记录失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("ChmlFrp HTTP {}: {}", status, body));
         }
@@ -1339,10 +1641,7 @@ pub mod chmlfrp {
 
         // API 文档 data 为单个对象，但实际可能为数组；兼容两种形态
         let records: Vec<ChmlfrpRecord> = match value.get("data") {
-            Some(serde_json::Value::Array(arr)) => arr
-                .iter()
-                .map(parse_record)
-                .collect::<Vec<_>>(),
+            Some(serde_json::Value::Array(arr)) => arr.iter().map(parse_record).collect::<Vec<_>>(),
             Some(obj) if obj.is_object() => vec![parse_record(obj)],
             _ => Vec::new(),
         };
@@ -1357,14 +1656,46 @@ pub mod chmlfrp {
 
     fn parse_record(item: &serde_json::Value) -> ChmlfrpRecord {
         ChmlfrpRecord {
-            record_id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            user_id: item.get("userid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            domain: item.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            record: item.get("record").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            record_type: item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            target: item.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            ttl: item.get("ttl").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            remarks: item.get("remarks").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            record_id: item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            user_id: item
+                .get("userid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            domain: item
+                .get("domain")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            record: item
+                .get("record")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            record_type: item
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            target: item
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            ttl: item
+                .get("ttl")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            remarks: item
+                .get("remarks")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         }
     }
 
@@ -1394,7 +1725,10 @@ pub mod chmlfrp {
             .map_err(|e| format!("ChmlFrp 创建记录失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("ChmlFrp HTTP {}: {}", status, body));
         }
@@ -1429,7 +1763,10 @@ pub mod chmlfrp {
             .map_err(|e| format!("ChmlFrp 修改记录失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("ChmlFrp HTTP {}: {}", status, body));
         }
@@ -1458,7 +1795,10 @@ pub mod chmlfrp {
             .map_err(|e| format!("ChmlFrp 删除记录失败: {}", e))?;
 
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
         if !status.is_success() {
             return Err(format!("ChmlFrp HTTP {}: {}", status, body));
         }
@@ -1519,12 +1859,30 @@ pub mod chmlfrp {
             // ChmlFrp update 接口不支持修改记录类型，类型不匹配时需先删除再创建
             if !rec.record_type.eq_ignore_ascii_case(record_type) {
                 delete_free_subdomain(cred, domain, subdomain).await?;
-                create_free_subdomain(cred, domain, subdomain, record_type, value, "10分钟", remarks).await?;
+                create_free_subdomain(
+                    cred,
+                    domain,
+                    subdomain,
+                    record_type,
+                    value,
+                    "10分钟",
+                    remarks,
+                )
+                .await?;
             } else {
                 update_free_subdomain(cred, domain, subdomain, value, "10分钟", remarks).await?;
             }
         } else {
-            create_free_subdomain(cred, domain, subdomain, record_type, value, "10分钟", remarks).await?;
+            create_free_subdomain(
+                cred,
+                domain,
+                subdomain,
+                record_type,
+                value,
+                "10分钟",
+                remarks,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -1547,12 +1905,30 @@ pub mod chmlfrp {
             }
             if !rec.record_type.eq_ignore_ascii_case(record_type) {
                 delete_free_subdomain(cred, domain, subdomain).await?;
-                create_free_subdomain(cred, domain, subdomain, record_type, value, "10分钟", remarks).await?;
+                create_free_subdomain(
+                    cred,
+                    domain,
+                    subdomain,
+                    record_type,
+                    value,
+                    "10分钟",
+                    remarks,
+                )
+                .await?;
             } else {
                 update_free_subdomain(cred, domain, subdomain, value, "10分钟", remarks).await?;
             }
         } else {
-            create_free_subdomain(cred, domain, subdomain, record_type, value, "10分钟", remarks).await?;
+            create_free_subdomain(
+                cred,
+                domain,
+                subdomain,
+                record_type,
+                value,
+                "10分钟",
+                remarks,
+            )
+            .await?;
         }
         Ok(())
     }

@@ -63,7 +63,7 @@ export type SpeedTestCallback = (progress: SpeedTestProgress) => void;
 export interface SpeedTestOptions {
   testLatency?: boolean;
   testSpeed?: boolean;
-  speedTestSize?: number;
+  durationSeconds?: number;
 }
 
 export class SpeedTestService {
@@ -102,7 +102,7 @@ export class SpeedTestService {
     onProgress: SpeedTestCallback,
     options: SpeedTestOptions = {},
   ): Promise<SpeedTestResult> {
-    const { testLatency = true, testSpeed = true, speedTestSize = 10 } = options;
+    const { testLatency = true, testSpeed = true, durationSeconds = 15 } = options;
     
     this.abortController = new AbortController();
     this.logs = [];
@@ -275,7 +275,7 @@ export class SpeedTestService {
         downloadSpeed = await this.testTcpSpeed(
           tunnelInfo.nodeIp,
           tunnelInfo.remotePort,
-          speedTestSize,
+          durationSeconds,
         );
         this.addLog(`下载速度: ${downloadSpeed.toFixed(2)} Mbps`, "success");
       }
@@ -439,9 +439,9 @@ export class SpeedTestService {
   private async testTcpSpeed(
     host: string,
     port: number,
-    sizeMb: number,
+    durationSeconds: number,
   ): Promise<number> {
-    console.log("[SpeedTest] Starting TCP speed test:", { host, port, sizeMb });
+    console.log("[SpeedTest] Starting TCP speed test:", { host, port, durationSeconds });
 
     try {
       const result = await invoke<{
@@ -453,7 +453,7 @@ export class SpeedTestService {
       }>("tcp_speed_test", {
         host,
         port,
-        sizeMb,
+        durationSeconds,
       });
 
       console.log("[SpeedTest] TCP speed test result:", result);

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Trash2, Loader2, FileText, Database, ScrollText, Columns3 } from "lucide-react";
+import { Loader2, FileText, Database, ScrollText, Columns3 } from "lucide-react";
 import {
   Item,
   ItemContent,
@@ -16,6 +16,7 @@ import { CleanTxtDialog } from "./CleanTxtDialog";
 import { dnsFailoverService } from "@/services/dnsFailoverService";
 import { ddnsService } from "@/services/ddnsService";
 import { sslService } from "@/services/sslService";
+import { clearIssueAttachmentCache } from "@/services/issueAttachmentCache";
 
 /** 清除 TXT 解析记录的 Beta 提示文案 */
 const CLEAN_TXT_BETA_TITLE =
@@ -102,7 +103,7 @@ export function MaintenanceSection() {
     }
   };
 
-  /** 清理本地缓存：清除节点测速结果、节点列表缓存、测试历史、UDP 缓存 */
+  /** 清理本地缓存：清除节点测速结果、节点列表缓存、测试历史、UDP 缓存和工单附件缓存 */
   const handleCleanCache = async () => {
     if (cleaningCache) return;
 
@@ -112,7 +113,7 @@ export function MaintenanceSection() {
     const confirmed = await confirm({
       title: "清理本地缓存",
       description:
-        "将清除节点测速结果、节点列表缓存、测试历史和 UDP 缓存，需重新测试或加载。确认清理？",
+        "将清除节点测速结果、节点列表缓存、测试历史、UDP 缓存和工单附件缓存，需重新测试或加载。确认清理？",
       confirmText: "清理",
       variant: "destructive",
     });
@@ -129,6 +130,8 @@ export function MaintenanceSection() {
         localStorage.removeItem(key);
         cleared++;
       }
+      await clearIssueAttachmentCache();
+      cleared++;
       toast.success(`已清理 ${cleared} 类本地缓存`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "清理缓存失败");
@@ -211,11 +214,7 @@ export function MaintenanceSection() {
   };
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-        <Trash2 className="w-4 h-4" />
-        <span>数据维护</span>
-      </div>
+    <>
       <div className="rounded-lg bg-card overflow-hidden">
         <Item variant="outline" className="border-0">
           <ItemContent>
@@ -380,6 +379,6 @@ export function MaintenanceSection() {
       {showCleanTxt && (
         <CleanTxtDialog open={showCleanTxt} onClose={() => setShowCleanTxt(false)} />
       )}
-    </div>
+    </>
   );
 }

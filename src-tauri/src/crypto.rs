@@ -6,7 +6,6 @@
  *
  * 所有加密/解密均以字节向量为输入输出，调用方负责 Base64 编解码。
  */
-
 use base64::{engine::general_purpose, Engine as _};
 
 /// 加密字符串，返回 Base64 编码的密文
@@ -60,9 +59,14 @@ mod platform {
                 &mut output_blob,
             );
             if success == 0 {
-                return Err(format!("DPAPI CryptProtectData 失败, 错误码: {}", windows_sys::Win32::Foundation::GetLastError()));
+                return Err(format!(
+                    "DPAPI CryptProtectData 失败, 错误码: {}",
+                    windows_sys::Win32::Foundation::GetLastError()
+                ));
             }
-            let result = std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize).to_vec();
+            let result =
+                std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize)
+                    .to_vec();
             // 释放 DPAPI 分配的内存
             windows_sys::Win32::Foundation::LocalFree(output_blob.pbData as *mut _);
             Ok(result)
@@ -91,9 +95,14 @@ mod platform {
                 &mut output_blob,
             );
             if success == 0 {
-                return Err(format!("DPAPI CryptUnprotectData 失败, 错误码: {}", windows_sys::Win32::Foundation::GetLastError()));
+                return Err(format!(
+                    "DPAPI CryptUnprotectData 失败, 错误码: {}",
+                    windows_sys::Win32::Foundation::GetLastError()
+                ));
             }
-            let result = std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize).to_vec();
+            let result =
+                std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize)
+                    .to_vec();
             windows_sys::Win32::Foundation::LocalFree(output_blob.pbData as *mut _);
             if !description.is_null() {
                 windows_sys::Win32::Foundation::LocalFree(description as *mut _);

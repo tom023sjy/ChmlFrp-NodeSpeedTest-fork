@@ -1,3 +1,6 @@
+import type { SpeedSample } from "./speedSamples";
+import type { LogEntry } from "./speedTestService";
+
 export interface TestHistoryRecord {
   nodeName: string;
   nodeId: number;
@@ -6,35 +9,73 @@ export interface TestHistoryRecord {
   downloadSpeed?: number;
   success: boolean;
   error?: string;
+  senderId: string;
+  senderName: string;
+  receiverId: string;
+  receiverName: string;
+  pairKey: string;
+  latencySamples?: Array<number | null>;
+  speedSamples?: SpeedSample[];
+  jitterMs?: number;
+  packetLossPercent?: number;
+  testDurationSeconds?: number;
+  logs?: LogEntry[];
+}
+
+export interface TestHistoryPair {
+  senderId: string;
+  senderName: string;
+  receiverId: string;
+  receiverName: string;
 }
 
 const STORAGE_KEY_PREFIX = "node_test_history";
 const MAX_HISTORY_PER_NODE = 50;
 
-/// 按账号隔离的存储 key：node_test_history__${username}
-/// 旧数据（无后缀）首次访问时自动迁移到当前账号名下
 function storageKey(username: string | undefined | null): string {
   if (!username) {
-    // 未登录时回退到旧 key，避免数据丢失
     return STORAGE_KEY_PREFIX;
   }
   return `${STORAGE_KEY_PREFIX}__${username}`;
 }
 
-/// 一次性迁移旧数据到当前账号 key
-/// 仅当旧 key 存在且新 key 不存在时执行
+function defaultPair(): TestHistoryPair {
+  return {
+    senderId: "local",
+    senderName: "本机",
+    receiverId: "local",
+    receiverName: "本机",
+  };
+}
+
+function pairKey(pair: Pick<TestHistoryPair, "senderId" | "receiverId">): string {
+  return `${pair.senderId}__${pair.receiverId}`;
+}
+
+function normalizeRecord(record: Omit<TestHistoryRecord, "senderId" | "senderName" | "receiverId" | "receiverName" | "pairKey"> & Partial<TestHistoryPair & Pick<TestHistoryRecord, "pairKey">>): TestHistoryRecord {
+  const pair = record.senderId && record.receiverId
+    ? {
+        senderId: record.senderId,
+        senderName: record.senderName ?? record.senderId,
+        receiverId: record.receiverId,
+        receiverName: record.receiverName ?? record.receiverId,
+      }
+    : defaultPair();
+  return { ...record, ...pair, pairKey: record.pairKey ?? pairKey(pair) };
+}
+
 function migrateLegacy(username: string | undefined | null): void {
   if (!username) return;
   const newKey = storageKey(username);
-  if (localStorage.getItem(newKey)) return; // 新 key 已有数据，不覆盖
+  if (localStorage.getItem(newKey)) return;
   const legacy = localStorage.getItem(STORAGE_KEY_PREFIX);
-  if (!legacy) return; // 旧 key 无数据
+  if (!legacy) return;
   try {
-    JSON.parse(legacy); // 校验格式
-    localStorage.setItem(newKey, legacy);
-    localStorage.removeItem(STORAGE_KEY_PREFIX); // 移除旧 key 避免重复迁移
+    const records = JSON.parse(legacy) as Array<Record<string, unknown>>;
+    localStorage.setItem(newKey, JSON.stringify(records.map((record) => normalizeRecord(record as never))));
+    localStorage.removeItem(STORAGE_KEY_PREFIX);
   } catch {
-    // 旧数据格式错误，跳过迁移
+    return;
   }
 }
 
@@ -42,30 +83,32 @@ export function getTestHistory(username?: string): TestHistoryRecord[] {
   migrateLegacy(username);
   try {
     const stored = localStorage.getItem(storageKey(username));
-    return stored ? JSON.parse(stored) : [];
+    return stored ? (JSON.parse(stored) as Array<Record<string, unknown>>).map((record) => normalizeRecord(record as never)) : [];
   } catch {
     return [];
   }
 }
 
-export function getNodeTestHistory(nodeName: string, username?: string): TestHistoryRecord[] {
+export function getNodeTestHistory(nodeName: string, username?: string, pair?: TestHistoryPair): TestHistoryRecord[] {
   const history = getTestHistory(username);
+  const selectedPairKey = pair ? pairKey(pair) : undefined;
   return history
-    .filter((r) => r.nodeName === nodeName)
+    .filter((r) => r.nodeName === nodeName && (!selectedPairKey || r.pairKey === selectedPairKey))
     .sort((a, b) => b.timestamp - a.timestamp);
 }
 
 export function addTestHistory(record: TestHistoryRecord, username?: string): void {
   const history = getTestHistory(username);
-  history.unshift(record);
+  history.unshift(normalizeRecord(record as never));
 
   const grouped: Record<string, TestHistoryRecord[]> = {};
   history.forEach((r) => {
-    if (!grouped[r.nodeName]) {
-      grouped[r.nodeName] = [];
+    const groupKey = `${r.nodeName}::${r.pairKey}`;
+    if (!grouped[groupKey]) {
+      grouped[groupKey] = [];
     }
-    if (grouped[r.nodeName].length < MAX_HISTORY_PER_NODE) {
-      grouped[r.nodeName].push(r);
+    if (grouped[groupKey].length < MAX_HISTORY_PER_NODE) {
+      grouped[groupKey].push(r);
     }
   });
 

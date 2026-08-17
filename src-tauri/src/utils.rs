@@ -66,14 +66,24 @@ fn bundled_frpc_candidates(app_handle: &tauri::AppHandle) -> Vec<PathBuf> {
 
     if let Ok(resource_dir) = app_handle.path().resource_dir() {
         candidates.push(resource_dir.join(file_name));
-        candidates.push(resource_dir.join("frp-binaries").join(platform_dir()).join(file_name));
+        candidates.push(
+            resource_dir
+                .join("frp-binaries")
+                .join(platform_dir())
+                .join(file_name),
+        );
     }
 
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             candidates.push(exe_dir.join("resources").join(file_name));
             candidates.push(exe_dir.join(file_name));
-            candidates.push(exe_dir.join("frp-binaries").join(platform_dir()).join(file_name));
+            candidates.push(
+                exe_dir
+                    .join("frp-binaries")
+                    .join(platform_dir())
+                    .join(file_name),
+            );
         }
     }
 

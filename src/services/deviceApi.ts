@@ -8,6 +8,7 @@
 import { BACKEND_API_BASE_URL } from "@/lib/api-endpoints";
 import { getStoredUser } from "@/services/api";
 import { getDeviceId } from "@/services/deviceId";
+import { requireDeviceManagement } from "@/services/featureAvailability";
 
 // ===== 类型定义 =====
 
@@ -25,6 +26,7 @@ export interface DeviceInfo {
   isCurrent: boolean;
   lastSeenAt: string;
   createdAt: string;
+  capabilities?: string[];
 }
 
 // ===== 内部工具 =====
@@ -64,12 +66,21 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 /**
  * 获取当前账号绑定的所有设备列表。
  * 后端根据当前 token 解析 user_id 返回该用户的所有设备（含离线）。
+ *
+ * @param options.trackView 是否计入"查看设备列表"统计。
+ *   仅在用户主动打开设备管理界面时传 true；轮询/事件触发的静默刷新
+ *   以及测速对话框等间接调用传 false（默认），后端不记录统计。
  */
-export async function listDevices(): Promise<DeviceInfo[]> {
+export async function listDevices(options?: { trackView?: boolean }): Promise<DeviceInfo[]> {
+  requireDeviceManagement();
   const deviceId = await getDeviceId();
+  const headers: Record<string, string> = { "X-Device-Id": deviceId };
+  if (options?.trackView) {
+    headers["X-Track-View"] = "1";
+  }
   const resp = await fetch(backendUrl("/api/devices"), {
     method: "GET",
-    headers: authHeaders({ "X-Device-Id": deviceId }),
+    headers: authHeaders(headers),
   });
 
   if (!resp.ok) {
@@ -83,6 +94,7 @@ export async function listDevices(): Promise<DeviceInfo[]> {
 
 /** 重命名设备（只能改自己账号下的设备） */
 export async function renameDevice(deviceId: string, deviceName: string): Promise<void> {
+  requireDeviceManagement();
   const resp = await fetch(backendUrl(`/api/devices/${encodeURIComponent(deviceId)}`), {
     method: "PATCH",
     headers: authHeaders(),
@@ -100,6 +112,7 @@ export async function renameDevice(deviceId: string, deviceName: string): Promis
  * 设备上的数据保留，仅当用户主动调用 delete_my_data 才删除。
  */
 export async function unbindDevice(deviceId: string): Promise<void> {
+  requireDeviceManagement();
   const resp = await fetch(backendUrl(`/api/devices/${encodeURIComponent(deviceId)}`), {
     method: "DELETE",
     headers: authHeaders(),

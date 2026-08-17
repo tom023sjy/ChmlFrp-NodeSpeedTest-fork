@@ -54,6 +54,10 @@ import {
   type BatchE2EProgress,
 } from "@/services/e2eTestService";
 import { getRelayClient } from "@/services/deviceRelay";
+import {
+  getStoredDurationSeconds,
+  setStoredDurationSeconds,
+} from "@/services/nodeTestPreferences";
 
 // ===== 全局状态 store（复制自 BatchSpeedTestDialog 的模式） =====
 
@@ -63,7 +67,7 @@ interface E2ETestConfig {
   direction: "to_local" | "to_remote";
   testLatency: boolean;
   testSpeed: boolean;
-  sizeMb: number;
+  durationSeconds: number;
 }
 
 /** 日志条目 */
@@ -83,7 +87,7 @@ export interface E2ETestState {
   logs: E2ELogEntry[];
 }
 
-let globalE2EState: E2ETestState = {
+const globalE2EState: E2ETestState = {
   isRunning: false,
   isStopping: false,
   config: {
@@ -91,7 +95,7 @@ let globalE2EState: E2ETestState = {
     direction: "to_local",
     testLatency: true,
     testSpeed: true,
-    sizeMb: 10,
+    durationSeconds: getStoredDurationSeconds(localStorage),
   },
   progress: null,
   results: [],
@@ -301,7 +305,7 @@ export function E2ETestDialog({ isOpen, onClose, nodes }: E2ETestDialogProps) {
           direction: config.direction,
           testLatency: config.testLatency,
           testSpeed: config.testSpeed,
-          sizeMb: config.sizeMb,
+          durationSeconds: config.durationSeconds,
           onLog: (msg, level) => addLog(msg, level),
           onProgress: (p) => {
             const nodePct = i / total + (p.progress / 100) * (0.9 / total);
@@ -606,22 +610,23 @@ export function E2ETestDialog({ isOpen, onClose, nodes }: E2ETestDialogProps) {
                   </div>
                   {config.testSpeed && (
                     <div className="flex items-center gap-2 pl-6">
-                      <label className="text-sm text-muted-foreground whitespace-nowrap">测试大小:</label>
+                      <label className="text-sm text-muted-foreground whitespace-nowrap">测试时长:</label>
                       <Input
                         type="number"
-                        min={1}
-                        max={100}
-                        value={config.sizeMb}
-                        onChange={(e) =>
-                          setConfig((prev) => ({
-                            ...prev,
-                            sizeMb: Math.min(100, Math.max(1, Number(e.target.value) || 10)),
-                          }))
-                        }
+                        min={5}
+                        max={120}
+                        value={config.durationSeconds}
+                        onChange={(e) => {
+                          const durationSeconds = setStoredDurationSeconds(
+                            localStorage,
+                            Number(e.target.value) || 15,
+                          );
+                          setConfig((prev) => ({ ...prev, durationSeconds }));
+                        }}
                         disabled={isRunning}
                         className="w-20 h-8"
                       />
-                      <span className="text-sm text-muted-foreground">MB</span>
+                      <span className="text-sm text-muted-foreground">秒</span>
                     </div>
                   )}
                 </div>

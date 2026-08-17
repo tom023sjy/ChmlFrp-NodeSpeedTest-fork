@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { listen } from "@tauri-apps/api/event";
-import { type StoredUser } from "@/services/api";
+import { type StoredUser, getStoredUser } from "@/services/api";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   ddnsService,
@@ -45,6 +45,12 @@ import {
 } from "@/services/ddnsService";
 import { dnsFailoverService, type DnsProviderKind } from "@/services/dnsFailoverService";
 import { reportUsage } from "@/services/backendApi";
+
+/** 已登录时上报事件，失败静默处理 */
+function reportUsageIfLoggedIn(eventType: string, eventData?: Record<string, unknown>): void {
+  if (!getStoredUser()?.accessToken) return;
+  reportUsage({ eventType, eventData }).catch(() => {});
+}
 
 interface DnsManagementProps {
   user?: StoredUser | null;
@@ -197,6 +203,10 @@ function TasksTab({ user, isLoggedIn }: TasksTabProps) {
     if (!user?.username) return;
     try {
       await ddnsService.saveTask(user.username, { ...task, enabled: !task.enabled });
+      // DDNS 任务启用/停用（API 成功 = 真实结果）
+      reportUsageIfLoggedIn(task.enabled ? "ddns_task_disable" : "ddns_task_enable", {
+        record_type: task.recordType || "A",
+      });
       load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "操作失败");
@@ -215,6 +225,10 @@ function TasksTab({ user, isLoggedIn }: TasksTabProps) {
     try {
       await ddnsService.deleteTask(user.username, task.id);
       toast.success("已删除");
+      // DDNS 任务删除（API 成功 = 真实结果）
+      reportUsageIfLoggedIn("ddns_task_delete", {
+        record_type: task.recordType || "A",
+      });
       load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "删除失败");
@@ -476,12 +490,14 @@ function TaskEditDialog({
     }
     setSaving(true);
     try {
+      const isNew = !form.id;
       const payload = { ...form, id: form.id || `t_${Date.now().toString(36)}` };
       await ddnsService.saveTask(user.username, payload);
       toast.success("已保存");
-      // DDNS 任务更新/创建埋点：仅在用户已登录时上报，失败静默不影响主流程
+      // DDNS 任务保存成功埋点：兼容旧事件 ddns_update + 区分新建/编辑
       if (user?.accessToken) {
         reportUsage({ eventType: "ddns_update" }).catch(() => {});
+        reportUsage({ eventType: isNew ? "ddns_task_create" : "ddns_task_update", eventData: { record_type: form.recordType || "A" } }).catch(() => {});
       }
       onSaved();
     } catch (e) {

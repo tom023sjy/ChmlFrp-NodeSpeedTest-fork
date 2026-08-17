@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { Settings2 } from "lucide-react";
 import {
   Item,
   ItemContent,
@@ -16,6 +15,13 @@ import {
   setBetaTooltipEnabled,
   type CloseAction,
 } from "@/lib/settings-utils";
+import {
+  getStoredStatisticMode,
+  notifyNodeTestPreferencesChanged,
+  setStoredStatisticMode,
+  type StatisticMode,
+  type StatisticTarget,
+} from "@/services/nodeTestPreferences";
 
 // 关闭窗口默认行为选项
 const closeActionOptions = [
@@ -24,12 +30,24 @@ const closeActionOptions = [
   { value: "exit", label: "直接退出" },
 ];
 
+const statisticOptions = [
+  { value: "max", label: "最大值" },
+  { value: "avg", label: "平均值" },
+  { value: "min", label: "最小值" },
+];
+
 export function GeneralSection() {
   const [closeAction, setCloseActionState] = useState<CloseAction>(() =>
     getCloseAction(),
   );
   const [betaTooltip, setBetaTooltip] = useState(() =>
     getBetaTooltipEnabled(),
+  );
+  const [latencyStatistic, setLatencyStatistic] = useState<StatisticMode>(() =>
+    getStoredStatisticMode(localStorage, "latency"),
+  );
+  const [speedStatistic, setSpeedStatistic] = useState<StatisticMode>(() =>
+    getStoredStatisticMode(localStorage, "speed"),
   );
 
   // 监听关闭行为变更（关闭弹窗记忆选择时会同步更新这里）
@@ -56,13 +74,19 @@ export function GeneralSection() {
     setBetaTooltip(checked);
   };
 
+  const handleStatisticChange = (
+    target: StatisticTarget,
+    value: string | number,
+  ) => {
+    const mode = String(value) as StatisticMode;
+    setStoredStatisticMode(localStorage, target, mode);
+    if (target === "latency") setLatencyStatistic(mode);
+    else setSpeedStatistic(mode);
+    notifyNodeTestPreferencesChanged();
+  };
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-        <Settings2 className="w-4 h-4" />
-        <span>通用</span>
-      </div>
-      <div className="rounded-lg bg-card overflow-hidden">
+    <div className="rounded-lg bg-card overflow-hidden">
         <Item variant="outline" className="border-0">
           <ItemContent>
             <ItemTitle>关闭窗口行为</ItemTitle>
@@ -91,7 +115,40 @@ export function GeneralSection() {
             <Switch checked={betaTooltip} onCheckedChange={handleBetaToggle} />
           </ItemActions>
         </Item>
-      </div>
+        <Item variant="outline" className="border-0 border-t">
+          <ItemContent>
+            <ItemTitle>节点延迟显示</ItemTitle>
+            <ItemDescription className="text-xs">
+              节点测试表格显示多次延迟探测的统计值
+            </ItemDescription>
+          </ItemContent>
+          <ItemActions>
+            <Select
+              options={statisticOptions}
+              value={latencyStatistic}
+              onChange={(value) => handleStatisticChange("latency", value)}
+              size="sm"
+              className="w-24"
+            />
+          </ItemActions>
+        </Item>
+        <Item variant="outline" className="border-0 border-t">
+          <ItemContent>
+            <ItemTitle>节点带宽显示</ItemTitle>
+            <ItemDescription className="text-xs">
+              节点测试表格显示测速采样的统计值
+            </ItemDescription>
+          </ItemContent>
+          <ItemActions>
+            <Select
+              options={statisticOptions}
+              value={speedStatistic}
+              onChange={(value) => handleStatisticChange("speed", value)}
+              size="sm"
+              className="w-24"
+            />
+          </ItemActions>
+        </Item>
     </div>
   );
 }

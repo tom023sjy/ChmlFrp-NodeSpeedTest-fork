@@ -34,3 +34,7 @@ pnpm-debug.log*
 src-tauri/WixTools/
 src-tauri/NSIS/
 .tauri/
+
+# 本地开发数据与代理工作目录
+.dev-appdata/
+.superpowers/

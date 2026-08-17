@@ -1,3 +1,5 @@
+use crate::commands::ddns_task::{DdnsLog, DdnsTask};
+use crate::commands::dns_config::{DnsMonitorTask, DnsSwitchLog};
 /**
  * JSON → SQLite 数据迁移模块
  *
@@ -5,10 +7,7 @@
  * 仅在对应数据库表为空时执行迁移，避免重复导入。
  * 迁移过程中敏感字段（DNS 密钥、token）会自动加密后写入数据库。
  */
-
 use crate::commands::dns_provider::DnsCredential;
-use crate::commands::dns_config::{DnsMonitorTask, DnsSwitchLog};
-use crate::commands::ddns_task::{DdnsTask, DdnsLog};
 use crate::commands::ssl_manager::SslRequestLog;
 use crate::crypto;
 use crate::db;
@@ -88,7 +87,16 @@ fn migrate_dns_credentials(path: &PathBuf) {
                 "INSERT OR IGNORE INTO dns_credentials \
                  (id, name, provider, secret_id, secret_key, token, api_token, owner_username) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![&cred.id, &cred.name, &provider, &secret_id, &secret_key, &token, &api_token, &cred.owner_username],
+                params![
+                    &cred.id,
+                    &cred.name,
+                    &provider,
+                    &secret_id,
+                    &secret_key,
+                    &token,
+                    &api_token,
+                    &cred.owner_username
+                ],
             );
         }
     }
@@ -117,11 +125,24 @@ fn migrate_dns_tasks(path: &PathBuf) {
                   poll_interval_secs, check_methods, fail_method_threshold, \
                   tcping_timeout_secs, owner_username) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![&t.id, &t.name, if t.enabled { 1 } else { 0 }, &user_token,
-                        &t.credential_id, &t.domain, &t.subdomain,
-                        &primary_tunnel, &backup_tunnels, &t.fail_threshold, &t.recover_threshold,
-                        &t.poll_interval_secs, &check_methods, &t.fail_method_threshold,
-                        &t.tcping_timeout_secs, &t.owner_username],
+                params![
+                    &t.id,
+                    &t.name,
+                    if t.enabled { 1 } else { 0 },
+                    &user_token,
+                    &t.credential_id,
+                    &t.domain,
+                    &t.subdomain,
+                    &primary_tunnel,
+                    &backup_tunnels,
+                    &t.fail_threshold,
+                    &t.recover_threshold,
+                    &t.poll_interval_secs,
+                    &check_methods,
+                    &t.fail_method_threshold,
+                    &t.tcping_timeout_secs,
+                    &t.owner_username
+                ],
             );
         }
     }
@@ -144,9 +165,19 @@ fn migrate_dns_logs(path: &PathBuf) {
                  (id, task_id, task_name, kind, from_tunnel, to_tunnel, cname_value, \
                   success, message, time, owner_username) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![&l.id, &l.task_id, &l.task_name, &l.kind,
-                        &l.from_tunnel, &l.to_tunnel, &l.cname_value,
-                        if l.success { 1 } else { 0 }, &l.message, &l.time, &l.owner_username],
+                params![
+                    &l.id,
+                    &l.task_id,
+                    &l.task_name,
+                    &l.kind,
+                    &l.from_tunnel,
+                    &l.to_tunnel,
+                    &l.cname_value,
+                    if l.success { 1 } else { 0 },
+                    &l.message,
+                    &l.time,
+                    &l.owner_username
+                ],
             );
         }
     }
@@ -198,9 +229,17 @@ fn migrate_ddns_logs(path: &PathBuf) {
                  (time, task_id, task_name, action, detected_ip, previous_ip, updated_ip, \
                   message, owner_username) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![&l.time, &l.task_id, &l.task_name, &l.action,
-                        &l.detected_ip, &l.previous_ip, &l.updated_ip,
-                        &l.message, &l.owner_username],
+                params![
+                    &l.time,
+                    &l.task_id,
+                    &l.task_name,
+                    &l.action,
+                    &l.detected_ip,
+                    &l.previous_ip,
+                    &l.updated_ip,
+                    &l.message,
+                    &l.owner_username
+                ],
             );
         }
     }

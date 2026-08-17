@@ -1,6 +1,6 @@
+use log::{debug, error, info, warn};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
-use log::{info, error, debug, warn};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct TcpingResult {
@@ -11,10 +11,14 @@ pub struct TcpingResult {
 }
 
 #[tauri::command]
-pub async fn tcping_host(host: String, port: Option<u16>, timeout: Option<u64>) -> Result<TcpingResult, String> {
+pub async fn tcping_host(
+    host: String,
+    port: Option<u16>,
+    timeout: Option<u64>,
+) -> Result<TcpingResult, String> {
     let port = port.unwrap_or(7000);
     let timeout_secs = timeout.unwrap_or(3);
-    
+
     info!("Starting TCP ping test for host: {}:{}", host, port);
 
     if host.is_empty() {
@@ -34,13 +38,13 @@ pub async fn tcping_host(host: String, port: Option<u16>, timeout: Option<u64>) 
             raw_output: Some("Port is 0".to_string()),
         });
     }
-    
+
     tokio::task::spawn_blocking(move || {
         let start = Instant::now();
         let addr_str = format!("{}:{}", host, port);
-        
+
         debug!("Resolving and connecting to: {}", addr_str);
-        
+
         let socket_addr = match addr_str.to_socket_addrs() {
             Ok(addrs) => {
                 let mut found = None;
@@ -77,29 +81,41 @@ pub async fn tcping_host(host: String, port: Option<u16>, timeout: Option<u64>) 
                 });
             }
         };
-        
+
         debug!("Connecting to resolved address: {}", socket_addr);
-        
+
         match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(timeout_secs)) {
             Ok(_stream) => {
                 let duration = start.elapsed();
                 let latency_ms = duration.as_secs_f64() * 1000.0;
-                
-                info!("TCP ping to {}:{} successful: {:.2}ms", host, port, latency_ms);
-                
+
+                info!(
+                    "TCP ping to {}:{} successful: {:.2}ms",
+                    host, port, latency_ms
+                );
+
                 Ok(TcpingResult {
                     success: true,
                     latency: Some(latency_ms),
                     error: None,
-                    raw_output: Some(format!("Connected to {}:{} in {:.2}ms", host, port, latency_ms)),
+                    raw_output: Some(format!(
+                        "Connected to {}:{} in {:.2}ms",
+                        host, port, latency_ms
+                    )),
                 })
             }
             Err(e) => {
                 let duration = start.elapsed();
                 let error_msg = format!("TCP connection failed: {}", e);
-                
-                warn!("TCP ping to {}:{} failed after {:.2}ms: {}", host, port, duration.as_secs_f64() * 1000.0, e);
-                
+
+                warn!(
+                    "TCP ping to {}:{} failed after {:.2}ms: {}",
+                    host,
+                    port,
+                    duration.as_secs_f64() * 1000.0,
+                    e
+                );
+
                 Ok(TcpingResult {
                     success: false,
                     latency: None,

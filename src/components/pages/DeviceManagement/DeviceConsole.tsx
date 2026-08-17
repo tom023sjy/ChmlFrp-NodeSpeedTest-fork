@@ -1,15 +1,25 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   ArrowLeft,
   Activity,
   Power,
   ArrowUpCircle,
   Terminal,
+  KeyRound,
 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import type { DeviceInfo } from "@/services/deviceApi";
+import {
+  generateSessionId,
+  buildLoginUrl,
+  startLoginPolling,
+} from "@/services/backendApi";
+import { daemonUpdateProxyToken } from "@/services/daemonManage";
 import { ServiceTab, UpdateTab, LogsTab } from "./DaemonManagePanel";
 
 interface DeviceConsoleProps {
@@ -22,6 +32,70 @@ type ManageTab = "service" | "update" | "logs";
 export function DeviceConsole({ device, onBack }: DeviceConsoleProps) {
   const isDaemon = device.deviceType === "daemon";
   const [activeTab, setActiveTab] = useState<ManageTab>("service");
+
+  // ===== 重新授权（更新 daemon 令牌）状态 =====
+  const confirm = useConfirm();
+  const [reauthState, setReauthState] = useState<"idle" | "polling">("idle");
+  const abortRef = useRef<AbortController | null>(null);
+
+  const cancelReauth = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setReauthState("idle");
+  };
+
+  /**
+   * 远程重新授权流程：
+   * 1. 打开浏览器完成 qzhua OAuth 授权
+   * 2. 轮询拿到新的 proxyToken
+   * 3. 通过 relay RPC 把新令牌发给 daemon（daemon 校验后写入配置并自动重连）
+   */
+  const startReauth = async () => {
+    const ok = await confirm({
+      title: "重新授权",
+      description: (
+        <div className="space-y-2">
+          <p>将为该 daemon 重新获取授权令牌（用于服务端到客户端测速等功能）。</p>
+          <p>点击确认后将在浏览器中打开授权页面，完成授权后新令牌会自动发送到服务器。</p>
+          <p className="text-muted-foreground">令牌更新后服务器会短暂离线几秒后自动重连。</p>
+        </div>
+      ),
+      variant: "info",
+      icon: KeyRound,
+      confirmText: "前往授权",
+    });
+    if (!ok) return;
+
+    setReauthState("polling");
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      // 1. 浏览器授权 + 轮询结果
+      const sessionId = generateSessionId();
+      await openUrl(buildLoginUrl(sessionId));
+      toast.info("已在浏览器中打开授权页面，请完成授权");
+
+      const result = await startLoginPolling(sessionId, {
+        intervalMs: 2000,
+        timeoutMs: 5 * 60 * 1000,
+        signal: controller.signal,
+      });
+
+      // 2. 把新令牌发给 daemon
+      await daemonUpdateProxyToken(device.deviceId, result.proxyToken);
+      toast.success("授权成功，daemon 令牌已更新，正在重连（约 3-5 秒）");
+    } catch (err) {
+      if (controller.signal.aborted) {
+        toast.info("已取消授权");
+      } else {
+        toast.error(err instanceof Error ? err.message : "授权失败");
+      }
+    } finally {
+      abortRef.current = null;
+      setReauthState("idle");
+    }
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -57,6 +131,38 @@ export function DeviceConsole({ device, onBack }: DeviceConsoleProps) {
             </p>
           </div>
         </div>
+
+        {/* 重新授权：更新 daemon 的 proxy_token（仅 daemon 设备显示） */}
+        {isDaemon && (
+          <div className="ml-auto flex items-center gap-2">
+            {reauthState === "polling" ? (
+              <>
+                <span className="text-xs text-muted-foreground">
+                  等待浏览器授权完成…
+                </span>
+                <Button variant="outline" size="sm" onClick={cancelReauth}>
+                  取消授权
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={startReauth}
+                disabled={!device.isOnline}
+                title={
+                  device.isOnline
+                    ? "重新获取授权令牌并更新到服务器"
+                    : "设备离线，无法远程更新令牌（需在服务器上手动修改配置）"
+                }
+              >
+                <KeyRound className="h-4 w-4" />
+                重新授权
+              </Button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Tab 切换 */}
@@ -102,7 +208,7 @@ export function DeviceConsole({ device, onBack }: DeviceConsoleProps) {
       )}
 
       {/* 内容区 */}
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div className="visible-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-4">
         {isDaemon ? (
           <>
             {activeTab === "service" && <ServiceTab deviceId={device.deviceId} />}

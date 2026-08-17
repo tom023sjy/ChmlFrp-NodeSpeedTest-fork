@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { requireFeature } from "./featureAvailability.ts";
 
 /** ChmlFrp 免费域名凭证的特殊标识（与后端保持一致） */
 export const CHMLFRP_CREDENTIAL_ID = "__chmlfrp__";
@@ -64,26 +65,31 @@ export interface SslRequestLog {
 export class SslService {
   /** 获取 SSL 证书列表 */
   async list(): Promise<SslCertificate[]> {
+    requireFeature("sslCertificates");
     return invoke<SslCertificate[]>("ssl_list");
   }
 
   /** 获取 SSL 证书详情 */
   async detail(id: number): Promise<SslCertificate> {
+    requireFeature("sslCertificates");
     return invoke<SslCertificate>("ssl_detail", { id });
   }
 
   /** 申请 SSL 证书（仅创建申请，不自动验证） */
   async request(params: SslRequestParams): Promise<SslCertificate> {
+    requireFeature("sslCertificates");
     return invoke<SslCertificate>("ssl_request", { params });
   }
 
   /** 触发域名验证 */
   async verify(id: number): Promise<SslCertificate> {
+    requireFeature("sslCertificates");
     return invoke<SslCertificate>("ssl_verify", { id });
   }
 
   /** 删除 SSL 证书 */
   async delete(id: number): Promise<void> {
+    requireFeature("sslCertificates");
     return invoke<void>("ssl_delete", { id });
   }
 
@@ -92,6 +98,7 @@ export class SslService {
     username: string,
     params: SslRequestParams,
   ): Promise<SslAutoRequestResult> {
+    requireFeature("sslCertificates");
     return invoke<SslAutoRequestResult>("ssl_auto_request", { username, params });
   }
 
@@ -105,6 +112,7 @@ export class SslService {
     params: SslRequestParams,
     onProgress: (p: SslRequestProgress) => void,
   ): Promise<() => void> {
+    requireFeature("sslCertificates");
     const taskId = await invoke<string>("ssl_auto_request_async", { username, params });
     const unlisten = await listen<SslRequestProgress>("ssl-request-progress", (event) => {
       if (event.payload.taskId === taskId) {
@@ -116,16 +124,19 @@ export class SslService {
 
   /** 保存一条申请日志（申请完成时调用） */
   async saveLog(log: SslRequestLog): Promise<void> {
+    requireFeature("sslCertificates");
     return invoke<void>("ssl_save_log", { log });
   }
 
   /** 列出当前用户的所有申请日志 */
   async listLogs(username: string): Promise<SslRequestLog[]> {
+    requireFeature("sslCertificates");
     return invoke<SslRequestLog[]>("ssl_list_logs", { username });
   }
 
   /** 清空当前用户的所有申请日志 */
   async clearLogs(username: string): Promise<void> {
+    requireFeature("sslCertificates");
     return invoke<void>("ssl_clear_logs", { username });
   }
 }

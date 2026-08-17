@@ -41,8 +41,8 @@ fn get_platform_string(os: &str, arch: &str) -> Option<&'static str> {
 }
 
 fn verify_sha256(file_path: &Path, expected_hash: &str) -> Result<(), String> {
-    let mut file = std::fs::File::open(file_path)
-        .map_err(|e| format!("无法打开文件进行 hash 验证: {}", e))?;
+    let mut file =
+        std::fs::File::open(file_path).map_err(|e| format!("无法打开文件进行 hash 验证: {}", e))?;
 
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
@@ -111,8 +111,8 @@ pub async fn get_download_info() -> Result<DownloadInfo, String> {
         return Err(format!("API 返回错误: {}", info_response.msg));
     }
 
-    let platform = get_platform_string(os, arch)
-        .ok_or_else(|| format!("不支持的平台: {} {}", os, arch))?;
+    let platform =
+        get_platform_string(os, arch).ok_or_else(|| format!("不支持的平台: {} {}", os, arch))?;
 
     let download = info_response
         .data

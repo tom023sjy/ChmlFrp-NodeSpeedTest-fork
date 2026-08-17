@@ -19,8 +19,8 @@ export const QZHUA_OAUTH_CLIENT_SECRET = "";
 // 官方部署地址，如需变更仅修改此处
 export const BACKEND_API_BASE_URL = "https://api.cct.zdzz.top";
 
-// ===== 应用更新源 =====
-export const UPDATE_API_URL = "https://u.zdzz.top/api/node-selector.json";
+// ===== 应用更新源（注意：服务端已去掉 .json 后缀，旧路径 /api/node-selector.json 返回 404） =====
+export const UPDATE_API_URL = "https://u.zdzz.top/api/node-selector";
 
 // ===== 官方链接 =====
 export const OFFICIAL_LINKS = {

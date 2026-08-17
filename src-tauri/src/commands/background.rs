@@ -1,6 +1,6 @@
+use crate::utils::get_app_data_dir;
 use std::fs;
 use std::path::Path;
-use crate::utils::get_app_data_dir;
 
 /// 允许的视频扩展名白名单
 const VIDEO_EXTS: &[&str] = &["mp4", "webm", "ogv", "mov"];
@@ -22,7 +22,13 @@ fn copy_to_backgrounds(
     // 校验扩展名
     let ext = source
         .extension()
-        .ok_or_else(|| format!("无法识别文件扩展名，支持的{}格式: {}", kind_name, allowed_exts.join(", ")))?
+        .ok_or_else(|| {
+            format!(
+                "无法识别文件扩展名，支持的{}格式: {}",
+                kind_name,
+                allowed_exts.join(", ")
+            )
+        })?
         .to_string_lossy()
         .to_lowercase();
     if !allowed_exts.contains(&ext.as_str()) {
@@ -78,7 +84,10 @@ pub async fn get_background_video_path(
         return Ok(None);
     }
 
-    for entry in fs::read_dir(&background_dir).map_err(|e| e.to_string())?.flatten() {
+    for entry in fs::read_dir(&background_dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let path = entry.path();
         if path.is_file() {
             if let Some(ext) = path.extension() {

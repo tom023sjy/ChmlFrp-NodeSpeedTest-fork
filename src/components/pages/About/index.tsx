@@ -27,11 +27,19 @@ import { updateService } from "@/services/updateService";
 import { getCurrentUser } from "@/services/backendApi";
 import { IssueSubmitDialog } from "./IssueSubmitDialog";
 import { IssueListSection } from "./IssueListSection";
+import { AnnouncementSection } from "./AnnouncementSection";
+import type { Announcement } from "@/services/appRuntimeConfig";
 
 const REPO_URL = OFFICIAL_LINKS.github;
 const RELEASES_URL = OFFICIAL_LINKS.historyVersions;
 
-export function About() {
+interface AboutProps {
+  announcements?: Announcement[];
+  announcementRefreshing?: boolean;
+  onRefreshAnnouncements?: () => void;
+}
+
+export function About({ announcements = [], announcementRefreshing = false, onRefreshAnnouncements = () => {} }: AboutProps) {
   const [currentVersion, setCurrentVersion] = useState<string>("");
   const [issueDialogOpen, setIssueDialogOpen] = useState(false);
   const [issueListKey, setIssueListKey] = useState(0);
@@ -54,6 +62,7 @@ export function About() {
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto visible-scrollbar space-y-6">
+        <AnnouncementSection announcements={announcements} refreshing={announcementRefreshing} onRefresh={onRefreshAnnouncements} />
         {/* 版本与项目信息 */}
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-sm font-medium text-foreground">

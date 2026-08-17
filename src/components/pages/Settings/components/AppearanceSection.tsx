@@ -1,5 +1,4 @@
 import { flushSync } from "react-dom";
-import { Palette } from "lucide-react";
 import {
   Item,
   ItemContent,
@@ -39,6 +38,7 @@ interface AppearanceSectionProps {
   setVideoVolume: (value: number) => void;
   sidebarMode: SidebarMode;
   setSidebarMode: (value: SidebarMode) => void;
+  onOpenSidebarVisibility: () => void;
   onSelectBackgroundImage: () => void;
   onClearBackgroundImage: () => void;
 }
@@ -67,6 +67,7 @@ export function AppearanceSection({
   setVideoVolume,
   sidebarMode,
   setSidebarMode,
+  onOpenSidebarVisibility,
   onSelectBackgroundImage,
   onClearBackgroundImage,
 }: AppearanceSectionProps) {
@@ -123,12 +124,7 @@ export function AppearanceSection({
   };
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-        <Palette className="w-4 h-4" />
-        <span>个性化</span>
-      </div>
-      <div className="rounded-lg bg-card overflow-hidden">
+    <div className="rounded-lg bg-card overflow-hidden">
         <Item variant="outline" className="border-0">
           <ItemContent>
             <ItemTitle>跟随系统主题</ItemTitle>
@@ -190,7 +186,7 @@ export function AppearanceSection({
           </>
         ) : null}
 
-        <ItemSeparator className="opacity-50" />
+        <ItemSeparator />
 
         <Item variant="outline" className="border-0">
           <ItemContent>
@@ -211,6 +207,22 @@ export function AppearanceSection({
               size="sm"
               className="w-32"
             />
+          </ItemActions>
+        </Item>
+
+        <ItemSeparator />
+
+        <Item variant="outline" className="border-0">
+          <ItemContent>
+            <ItemTitle>侧边栏显示项目</ItemTitle>
+            <ItemDescription className="text-xs">
+              选择侧边栏中显示的功能入口
+            </ItemDescription>
+          </ItemContent>
+          <ItemActions>
+            <Button size="sm" variant="outline" onClick={onOpenSidebarVisibility}>
+              显示控制
+            </Button>
           </ItemActions>
         </Item>
 
@@ -512,7 +524,6 @@ export function AppearanceSection({
             )}
           </>
         )}
-      </div>
     </div>
   );
 }

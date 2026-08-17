@@ -1,4 +1,4 @@
-import { Sparkles, Download, Check, AlertCircle, RotateCcw } from "lucide-react";
+import { Download, Check, AlertCircle, RotateCcw } from "lucide-react";
 import {
   Item,
   ItemContent,
@@ -47,12 +47,7 @@ export function UpdateSection({
   };
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-        <Sparkles className="w-4 h-4" />
-        <span>更新</span>
-      </div>
-      <div className="rounded-lg bg-card overflow-hidden">
+    <div className="rounded-lg bg-card overflow-hidden">
         <Item
           variant="outline"
           className="border-0 border-b border-border/60 last:border-0"
@@ -182,7 +177,6 @@ export function UpdateSection({
             </ItemContent>
           </Item>
         )}
-      </div>
     </div>
   );
 }

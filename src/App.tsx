@@ -22,11 +22,33 @@ import { useUpdateCheck } from "@/components/App/hooks/useUpdateCheck";
 import { BackgroundLayer } from "@/components/App/components/BackgroundLayer";
 import { UpdateDialog } from "@/components/dialogs/UpdateDialog";
 import { CloseConfirmDialog } from "@/components/dialogs/CloseConfirmDialog";
+import { AnnouncementDialog } from "@/components/dialogs/AnnouncementDialog";
+import { FeatureUnavailable } from "@/components/FeatureUnavailable";
+import {
+  defaultRuntimeConfig,
+  fetchAppRuntimeConfig,
+  findNewAnnouncements,
+  isAnnouncementRead,
+  isRuntimeConfigEqual,
+  markAnnouncementRead,
+  readAppRuntimeConfig,
+  RUNTIME_CONFIG_REFRESH_INTERVAL_MS,
+  writeAppRuntimeConfig,
+  type Announcement,
+  type RuntimeConfig,
+} from "@/services/appRuntimeConfig";
+import { setFeatureAvailabilities } from "@/services/featureAvailability";
 import { getInitialSidebarMode, getCloseAction, type SidebarMode } from "@/lib/settings-utils";
 import { updateService } from "@/services/updateService";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
+
+/** 已登录时上报事件，失败静默处理 */
+function reportUsageIfLoggedIn(eventType: string, eventData?: Record<string, unknown>): void {
+  if (!getStoredUser()?.accessToken) return;
+  reportUsage({ eventType, eventData }).catch(() => {});
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState("node-test");
@@ -63,6 +85,9 @@ function App() {
   const [installerPath, setInstallerPath] = useState<string | null>(null);
   // 关闭确认对话框（由后端 window-close-requested 事件触发）
   const [showCloseDialog, setShowCloseDialog] = useState(false);
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig>(defaultRuntimeConfig);
+  const [pendingAnnouncements, setPendingAnnouncements] = useState<Announcement[]>([]);
+  const [announcementRefreshing, setAnnouncementRefreshing] = useState(false);
 
   const shouldShowTitleBar = isMacOS
     ? showTitleBar
@@ -114,6 +139,78 @@ function App() {
     setActiveTab(tab);
   };
 
+  useEffect(() => {
+    const account = user?.username || "anonymous";
+    const cached = readAppRuntimeConfig(account);
+    const initial = cached ?? defaultRuntimeConfig();
+    setRuntimeConfig(initial);
+    setFeatureAvailabilities(initial.features);
+
+    let cancelled = false;
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const fresh = await fetchAppRuntimeConfig();
+        if (cancelled) return;
+        setRuntimeConfig((current) => {
+          if (isRuntimeConfigEqual(current, fresh)) return current;
+          writeAppRuntimeConfig(account, fresh);
+          return fresh;
+        });
+        setFeatureAvailabilities(fresh.features);
+      } catch {
+        return;
+      } finally {
+        refreshing = false;
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(refresh, RUNTIME_CONFIG_REFRESH_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [user?.username]);
+
+  useEffect(() => {
+    setFeatureAvailabilities(runtimeConfig.features);
+    const account = user?.username || "anonymous";
+    setPendingAnnouncements(runtimeConfig.announcements
+      .filter((announcement) => !isAnnouncementRead(account, announcement))
+      .sort((left, right) => right.sortOrder - left.sortOrder
+        || Date.parse(right.publishedAt) - Date.parse(left.publishedAt)));
+  }, [activeTab, runtimeConfig, user?.username]);
+
+  const handleAnnouncementClose = useCallback(() => {
+    const account = user?.username || "anonymous";
+    pendingAnnouncements.forEach((announcement) => markAnnouncementRead(account, announcement));
+    setPendingAnnouncements([]);
+  }, [pendingAnnouncements, user?.username]);
+
+  const handleRefreshAnnouncements = useCallback(async () => {
+    if (announcementRefreshing) return;
+    setAnnouncementRefreshing(true);
+    try {
+      const fresh = await fetchAppRuntimeConfig();
+      const newAnnouncements = findNewAnnouncements(runtimeConfig.announcements, fresh.announcements);
+      setRuntimeConfig(fresh);
+      setFeatureAvailabilities(fresh.features);
+      writeAppRuntimeConfig(user?.username || "anonymous", fresh);
+      if (newAnnouncements.length > 0) {
+        setPendingAnnouncements(newAnnouncements);
+        toast.success(`发现 ${newAnnouncements.length} 条新公告`);
+      } else {
+        toast.success("公告已是最新");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "刷新公告失败");
+    } finally {
+      setAnnouncementRefreshing(false);
+    }
+  }, [announcementRefreshing, runtimeConfig.announcements, user?.username]);
+
   const backgroundStyle = useMemo(() => {
     if (!backgroundImage) {
       return { backgroundColor: getBackgroundColorWithOpacity(100) };
@@ -137,6 +234,8 @@ function App() {
     setDownloadProgress(0);
     setDownloaded(false);
     setInstallerPath(null);
+    // 上报开始下载更新（确认为真实用户意图）
+    reportUsageIfLoggedIn("update_download_start", {});
     try {
       // 仅下载安装包，不自动重启
       const filePath = await updateService.downloadUpdate((progress) => {
@@ -145,8 +244,13 @@ function App() {
       setInstallerPath(filePath);
       setDownloaded(true);
       toast.success("更新已下载完成，可随时重启安装");
+      // 下载成功（确认为真实结果）
+      reportUsageIfLoggedIn("update_download_success", {});
     } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
       toast.error(error instanceof Error ? error.message : "下载更新失败");
+      // 下载失败（确认为真实失败）
+      reportUsageIfLoggedIn("update_download_failure", { reason });
     } finally {
       setIsDownloading(false);
     }
@@ -159,10 +263,16 @@ function App() {
       setDownloaded(false);
       return;
     }
+    // 上报开始安装更新（确认为真实用户意图）
+    // 注意：installUpdate 成功后应用会退出，"安装成功"需新版本启动后确认
+    // 按"仅准确事件"口径，此处只上报 update_install_start
+    reportUsageIfLoggedIn("update_install_start", {});
     try {
       await updateService.installUpdate(installerPath);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "启动安装失败";
+      // 安装启动失败（确认为真实失败）
+      reportUsageIfLoggedIn("update_install_failure", { reason: errorMsg });
       toast.error(errorMsg, {
         action: {
           label: "手动下载",
@@ -177,16 +287,34 @@ function App() {
   const content = useMemo(() => {
     switch (activeTab) {
       case "node-test":
+        if (!runtimeConfig.features.nodeTesting.enabled) {
+          return <FeatureUnavailable title="节点推荐" reason={runtimeConfig.features.nodeTesting.reason} />;
+        }
         return <NodeTest user={user} onTestingChange={handleTestingChange} />;
       case "dns-failover":
+        if (!runtimeConfig.features.dnsFailover.enabled) {
+          return <FeatureUnavailable title="DNS 容灾" reason={runtimeConfig.features.dnsFailover.reason} />;
+        }
         return <DnsFailover user={user} />;
       case "dns-management":
+        if (!runtimeConfig.features.ddns.enabled) {
+          return <FeatureUnavailable title="DDNS 解析" reason={runtimeConfig.features.ddns.reason} />;
+        }
         return <DnsManagement user={user} />;
       case "dns-credentials":
+        if (!runtimeConfig.features.dnsCredentials.enabled) {
+          return <FeatureUnavailable title="DNS 服务商" reason={runtimeConfig.features.dnsCredentials.reason} />;
+        }
         return <DnsCredentials user={user} />;
       case "ssl-certs":
+        if (!runtimeConfig.features.sslCertificates.enabled) {
+          return <FeatureUnavailable title="SSL 证书" reason={runtimeConfig.features.sslCertificates.reason} />;
+        }
         return <SslManagement user={user} />;
       case "device-management":
+        if (!runtimeConfig.features.deviceManagement.enabled) {
+          return <FeatureUnavailable title="设备管理" reason={runtimeConfig.features.deviceManagement.reason} />;
+        }
         return <DeviceManagement user={user} />;
       case "settings":
         return (
@@ -200,11 +328,17 @@ function App() {
           />
         );
       case "about":
-        return <About />;
+        return (
+          <About
+            announcements={runtimeConfig.announcements}
+            announcementRefreshing={announcementRefreshing}
+            onRefreshAnnouncements={() => void handleRefreshAnnouncements()}
+          />
+        );
       default:
         return <NodeTest user={user} onTestingChange={handleTestingChange} />;
     }
-  }, [activeTab, user, handleTestingChange, isDownloading, downloadProgress, downloaded, installerPath, handleUpdate, handleInstall]);
+  }, [activeTab, user, handleTestingChange, isDownloading, downloadProgress, downloaded, installerPath, handleUpdate, handleInstall, runtimeConfig, announcementRefreshing, handleRefreshAnnouncements]);
 
   const handleCloseUpdateDialog = useCallback(() => {
     setUpdateInfo(null);
@@ -293,6 +427,7 @@ function App() {
           osInfo: sysInfo.osInfo,
           hostname: sysInfo.hostname,
           interconnect,
+          capabilities: ["dns_failover_probe.v1", "full_chain_test.v2"],
         });
       } catch (err) {
         console.warn("[relay] 连接失败:", err);
@@ -377,6 +512,11 @@ function App() {
         onClose={() => setShowCloseDialog(false)}
         user={user}
       />
+      <AnnouncementDialog
+        announcements={pendingAnnouncements}
+        onConfirm={handleAnnouncementClose}
+        onRefresh={handleRefreshAnnouncements}
+      />
       <div
         ref={appContainerRef}
         className={`flex flex-col h-screen w-screen overflow-hidden text-foreground ${
@@ -449,6 +589,11 @@ function App() {
                 disabled={isTesting}
                 hasPendingUpdate={downloaded}
                 onInstallUpdate={handleInstall}
+                deviceManagementEnabled={runtimeConfig.features.deviceManagement.enabled}
+                deviceManagementReason={runtimeConfig.features.deviceManagement.reason}
+                sslCertificatesEnabled={runtimeConfig.features.sslCertificates.enabled}
+                sslCertificatesReason={runtimeConfig.features.sslCertificates.reason}
+                features={runtimeConfig.features}
               />
             </div>
 
@@ -485,6 +630,11 @@ function App() {
               disabled={isTesting}
               hasPendingUpdate={downloaded}
               onInstallUpdate={handleInstall}
+              deviceManagementEnabled={runtimeConfig.features.deviceManagement.enabled}
+              deviceManagementReason={runtimeConfig.features.deviceManagement.reason}
+              sslCertificatesEnabled={runtimeConfig.features.sslCertificates.enabled}
+              sslCertificatesReason={runtimeConfig.features.sslCertificates.reason}
+              features={runtimeConfig.features}
             />
             <div className="flex-1 flex flex-col overflow-hidden relative">
               {isMacOS && !showTitleBar ? (

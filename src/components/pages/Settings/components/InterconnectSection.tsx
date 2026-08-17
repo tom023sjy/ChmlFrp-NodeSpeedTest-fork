@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { MonitorSmartphone } from "lucide-react";
 import {
   Item,
   ItemContent,
@@ -39,12 +38,7 @@ export function InterconnectSection() {
   };
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-        <MonitorSmartphone className="h-4 w-4" />
-        <span>设备互联</span>
-      </div>
-      <div className="overflow-hidden rounded-lg bg-card">
+    <div className="overflow-hidden rounded-lg bg-card">
         <Item variant="outline" className="border-0">
           <ItemContent>
             <ItemTitle>允许远程管理</ItemTitle>
@@ -56,7 +50,6 @@ export function InterconnectSection() {
             <Switch checked={enabled} onCheckedChange={handleToggle} />
           </ItemActions>
         </Item>
-      </div>
     </div>
   );
 }

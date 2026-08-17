@@ -30,6 +30,13 @@ import {
   type SslRequestLog,
 } from "@/services/sslService";
 import type { StoredUser } from "@/services/api";
+import { reportUsage } from "@/services/backendApi";
+
+/** 已登录时上报事件，失败静默处理 */
+function reportUsageIfLoggedIn(user: StoredUser | null, eventType: string, eventData?: Record<string, unknown>): void {
+  if (!user?.accessToken) return;
+  reportUsage({ eventType, eventData }).catch(() => {});
+}
 
 /** 申请阶段对应的中文标签 */
 const STAGE_LABEL: Record<string, string> = {
@@ -406,6 +413,12 @@ export function SslProgressProvider({ children }: { children: ReactNode }) {
         username: user.username,
         createdAt: new Date().toISOString(),
       };
+      // 上报申请开始事件（仅准确事件：此处确认为真实开始）
+      reportUsageIfLoggedIn(user, "ssl_request_start", {
+        provider: params.provider,
+        domain_count: params.domains.length,
+        challenge_type: params.challengeType,
+      });
       try {
         const unlisten = await sslService.autoRequestAsync(
           user.username,
@@ -442,12 +455,24 @@ export function SslProgressProvider({ children }: { children: ReactNode }) {
               return next;
             });
             if (p.isFinal) {
+              // 基于后端最终状态可靠上报申请结果
+              const meta = metaRef.current;
+              const baseData = {
+                provider: meta?.params.provider,
+                domain_count: meta?.params.domains.length ?? 0,
+                final_status: p.finalStatus ?? null,
+                final_stage: p.stage,
+              };
               if (p.stage === "done" && p.finalStatus === "issued") {
                 toast.success("证书申请成功！");
+                reportUsageIfLoggedIn(user, "ssl_request_success", baseData);
               } else if (p.stage === "error") {
                 toast.error(`证书申请失败：${p.message}`);
+                reportUsageIfLoggedIn(user, "ssl_request_failure", { ...baseData, reason: p.message });
               } else if (p.finalStatus && p.finalStatus !== "issued") {
                 toast.warning(`证书状态：${p.finalStatus}`);
+                // 非成功签发也视为失败结果上报
+                reportUsageIfLoggedIn(user, "ssl_request_failure", { ...baseData, reason: `final_status=${p.finalStatus}` });
               }
               // 通知 SslManagement 刷新证书列表
               onCompleteRef.current?.();
@@ -456,7 +481,16 @@ export function SslProgressProvider({ children }: { children: ReactNode }) {
         );
         unlistenRef.current = unlisten;
       } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
         toast.error(e instanceof Error ? e.message : "启动申请失败");
+        // 启动阶段失败（无法进入进度回调）也视为申请失败
+        reportUsageIfLoggedIn(user, "ssl_request_failure", {
+          provider: params.provider,
+          domain_count: params.domains.length,
+          final_status: "failed",
+          final_stage: "startup_error",
+          reason,
+        });
         setProgress(null);
         metaRef.current = null;
       }

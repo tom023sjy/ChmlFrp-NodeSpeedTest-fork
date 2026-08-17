@@ -1,11 +1,32 @@
 import { BACKEND_API_BASE_URL } from "@/lib/api-endpoints";
+import {
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_TIMEOUT_MS,
+  isCurrentSocket,
+} from "./relayHeartbeat";
+
+/** 已登录时上报 RPC 事件，失败静默处理（动态导入避免循环依赖） */
+function reportRpcEvent(eventType: string, eventData: Record<string, unknown>): void {
+  try {
+    // 动态导入避免循环依赖
+    void Promise.all([
+      import("./backendApi"),
+      import("./api"),
+    ]).then(([{ reportUsage }, { getStoredUser }]) => {
+      if (!getStoredUser()?.accessToken) return;
+      reportUsage({ eventType, eventData }).catch(() => {});
+    });
+  } catch {
+    // 忽略上报失败
+  }
+}
 
 /**
  * 设备互联 WebSocket 中继客户端
  *
  * 职责：
  * - 连接后端中继服务，注册本机设备
- * - 30 秒心跳保活
+ * - 连接后立即心跳，之后每 10 秒保活
  * - 接收设备上下线事件
  * - 发送 RPC 请求到目标设备，管理请求-响应映射与超时
  * - 接收 RPC 请求（作为被管理端），调用注册的命令处理器执行
@@ -17,9 +38,11 @@ import { BACKEND_API_BASE_URL } from "@/lib/api-endpoints";
 
 export interface ConnectOpts {
   deviceType: "desktop" | "daemon";
+  deviceName?: string;
   osInfo: string;
   hostname: string;
   interconnect: boolean;
+  capabilities?: string[];
 }
 
 export interface RpcResponse<T = unknown> {
@@ -41,6 +64,23 @@ export interface DeviceEvent {
   deviceType?: string;
 }
 
+export interface DnsMonitorRelayEvent {
+  taskId: string;
+  revision?: number;
+  eventType?: string;
+  runtimeStatus?: string;
+  executionTarget?: { type: "cloud" | "device"; id: string };
+  lastCheckAt?: string;
+}
+
+export type RelayConnectionPhase = "idle" | "connecting" | "connected" | "reconnecting" | "auth_failed";
+
+export interface RelayConnectionState {
+  phase: RelayConnectionPhase;
+  message: string;
+  lastConnectedAt: number | null;
+}
+
 type CommandHandler = (params: unknown, context: RpcContext) => Promise<unknown>;
 
 /** RPC 调用上下文，传递 requestId 等信息给命令处理器 */
@@ -49,6 +89,7 @@ export interface RpcContext {
   requestId: string;
   /** 发起方设备 ID */
   fromDeviceId: string;
+  signal: AbortSignal;
 }
 
 type EventCallback = (e: DeviceEvent) => void;
@@ -60,13 +101,13 @@ type IncomingMessage =
   | { type: "device_online"; deviceId: string; deviceName: string; deviceType: string }
   | { type: "device_offline"; deviceId: string; deviceName: string }
   | { type: "rpc_request"; requestId: string; command: string; params: unknown; fromDeviceId: string }
+  | { type: "rpc_cancel"; requestId: string; runId?: string; command?: string; fromDeviceId: string }
   | { type: "rpc_response"; requestId: string; success: boolean; data: unknown; error: { code: string; message: string } | null }
-  | { type: "rpc_progress"; requestId: string; progress: number; stage: string; speedMbps?: number };
+  | { type: "rpc_progress"; requestId: string; progress: number; stage: string; speedMbps?: number }
+  | ({ type: "dns-monitor-event" } & DnsMonitorRelayEvent);
 
 // ===== 客户端实现 =====
 
-const HEARTBEAT_INTERVAL_MS = 30_000;
-const HEARTBEAT_TIMEOUT_MS = 60_000;
 const RECONNECT_DELAY_MS = 3_000;
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;
 const SPEEDTEST_RPC_TIMEOUT_MS = 120_000;
@@ -95,15 +136,28 @@ export class DeviceRelayClient {
 
   /** 本机命令处理器 */
   private commandHandlers = new Map<string, CommandHandler>();
+  private activeIncomingRpc = new Map<string, {
+    command: string;
+    params: unknown;
+    context: RpcContext;
+    abortController: AbortController;
+  }>();
 
   /** 设备上下线事件回调 */
   private eventCallbacks = {
     device_online: new Set<EventCallback>(),
     device_offline: new Set<EventCallback>(),
+    dns_monitor_event: new Set<(event: DnsMonitorRelayEvent) => void>(),
   };
 
   /** 连接状态变更回调 */
   private connectionCallbacks = new Set<(connected: boolean) => void>();
+  private connectionStateCallbacks = new Set<(state: RelayConnectionState) => void>();
+  private connectionState: RelayConnectionState = {
+    phase: "idle",
+    message: "中继未连接",
+    lastConnectedAt: null,
+  };
 
   /** 当前是否已连接 */
   private connected = false;
@@ -118,12 +172,16 @@ export class DeviceRelayClient {
       token,
       deviceId,
       deviceType: opts.deviceType,
+      ...(opts.deviceName ? { deviceName: opts.deviceName } : {}),
       osInfo: opts.osInfo,
       hostname: opts.hostname,
       interconnect: opts.interconnect ? "1" : "0",
+      capabilities: JSON.stringify(Object.fromEntries((opts.capabilities ?? []).map((capability) => {
+        const match = /^([a-z0-9_]+)\.v(\d+)$/.exec(capability);
+        return match ? [match[1], Number(match[2])] : [capability, 1];
+      }))),
     });
     this.url = `${wsBase}/api/devices/ws?${params.toString()}`;
-
     return this.doConnect();
   }
 
@@ -137,6 +195,7 @@ export class DeviceRelayClient {
       this.ws = null;
     }
     this.setConnected(false);
+    this.setConnectionState({ phase: "idle", message: "中继未连接" });
   }
 
   /** 是否已连接 */
@@ -163,6 +222,8 @@ export class DeviceRelayClient {
     options?: {
       timeoutMs?: number;
       onProgress?: (p: RpcProgress) => void;
+      signal?: AbortSignal;
+      runId?: string;
     },
   ): Promise<RpcResponse<T>> {
     const timeoutMs = options?.timeoutMs ?? (command === "speedtest" ? SPEEDTEST_RPC_TIMEOUT_MS : DEFAULT_RPC_TIMEOUT_MS);
@@ -188,14 +249,40 @@ export class DeviceRelayClient {
       requestId,
       targetDeviceId,
       command,
+      // 顶层 runId 供后端关联活动任务（断线清理、e2e_cleanup 等）；
+      // 与 params.runId 保持一致
+      ...(options?.runId ? { runId: options.runId } : {}),
       params,
     };
 
     return new Promise<RpcResponse<T>>((resolve, reject) => {
+      const handleAbort = () => {
+        clearTimeout(timer);
+        this.pendingRpc.delete(requestId);
+        this.progressCallbacks.delete(requestId);
+        unlistenProgress?.();
+        options?.signal?.removeEventListener("abort", handleAbort);
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({
+            type: "rpc_cancel",
+            requestId,
+            targetDeviceId,
+            runId: options?.runId,
+            command,
+          }));
+        }
+        reject(options?.signal?.reason instanceof Error
+          ? options.signal.reason
+          : new DOMException("RPC 已中止", "AbortError"));
+      };
       const timer = setTimeout(() => {
         this.pendingRpc.delete(requestId);
         this.progressCallbacks.delete(requestId);
         unlistenProgress?.();
+        options?.signal?.removeEventListener("abort", handleAbort);
+        // RPC 超时（确认为真实失败）
+        reportRpcEvent("rpc_timeout", { command, timeout_ms: timeoutMs });
+        reportRpcEvent("rpc_failure", { command, error_code: "TIMEOUT" });
         resolve({
           success: false,
           data: null,
@@ -207,15 +294,31 @@ export class DeviceRelayClient {
         resolve: (v: RpcResponse) => {
           clearTimeout(timer);
           unlistenProgress?.();
+          options?.signal?.removeEventListener("abort", handleAbort);
+          // 基于 RPC 响应可靠上报成功/失败
+          if (v.success) {
+            reportRpcEvent("rpc_success", { command });
+          } else {
+            reportRpcEvent("rpc_failure", { command, error_code: v.error?.code || "UNKNOWN" });
+          }
           resolve(v as RpcResponse<T>);
         },
         reject: (e: Error) => {
           clearTimeout(timer);
           unlistenProgress?.();
+          options?.signal?.removeEventListener("abort", handleAbort);
+          // RPC 发送或处理异常（确认为真实失败）
+          reportRpcEvent("rpc_failure", { command, error_code: "EXCEPTION", reason: e.message });
           reject(e);
         },
         timer,
       });
+
+      if (options?.signal?.aborted) {
+        handleAbort();
+        return;
+      }
+      options?.signal?.addEventListener("abort", handleAbort, { once: true });
 
       try {
         this.ws!.send(JSON.stringify(message));
@@ -223,6 +326,10 @@ export class DeviceRelayClient {
         clearTimeout(timer);
         this.pendingRpc.delete(requestId);
         unlistenProgress?.();
+        options?.signal?.removeEventListener("abort", handleAbort);
+        const reason = err instanceof Error ? err.message : String(err);
+        // WebSocket 发送失败（确认为真实失败）
+        reportRpcEvent("rpc_failure", { command, error_code: "SEND_FAILED", reason });
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
@@ -269,34 +376,65 @@ export class DeviceRelayClient {
     return () => this.eventCallbacks[event].delete(cb);
   }
 
+  onDnsMonitorEvent(cb: (event: DnsMonitorRelayEvent) => void): () => void {
+    this.eventCallbacks.dns_monitor_event.add(cb);
+    return () => this.eventCallbacks.dns_monitor_event.delete(cb);
+  }
+
+  getConnectionState(): RelayConnectionState {
+    return { ...this.connectionState };
+  }
+
+  onConnectionStateChange(cb: (state: RelayConnectionState) => void): () => void {
+    this.connectionStateCallbacks.add(cb);
+    return () => this.connectionStateCallbacks.delete(cb);
+  }
+
   // ===== 内部实现 =====
 
   private async doConnect(): Promise<void> {
     if (!this.url) return;
+    this.setConnectionState({ phase: "connecting", message: "正在连接中继" });
 
     try {
       const ws = new WebSocket(this.url);
       this.ws = ws;
 
       ws.onopen = () => {
+        if (!isCurrentSocket(this.ws, ws)) return;
         console.log("[relay] WebSocket 已连接");
         this.lastPongAt = Date.now();
-        this.startHeartbeat();
+        this.startHeartbeat(ws);
         this.setConnected(true);
+        this.setConnectionState({
+          phase: "connected",
+          message: "中继已连接",
+          lastConnectedAt: Date.now(),
+        });
       };
 
       ws.onmessage = (ev) => {
+        if (!isCurrentSocket(this.ws, ws)) return;
         this.handleMessage(ev.data);
       };
 
       ws.onerror = (ev) => {
+        if (!isCurrentSocket(this.ws, ws)) return;
         console.warn("[relay] WebSocket 错误:", ev);
+        this.setConnectionState({ phase: "reconnecting", message: "中继连接异常，等待重连" });
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        if (!isCurrentSocket(this.ws, ws)) return;
+        this.ws = null;
         console.log("[relay] WebSocket 已关闭");
         this.stopHeartbeat();
         this.setConnected(false);
+        const authFailed = event.code === 4001 || event.code === 4003;
+        this.setConnectionState({
+          phase: authFailed ? "auth_failed" : "reconnecting",
+          message: authFailed ? "中继鉴权失败，请重新登录" : "中继已断开，等待重连",
+        });
         // 失败所有待响应请求
         this.failAllPending("连接已断开");
         if (!this.isManualDisconnect) {
@@ -305,6 +443,7 @@ export class DeviceRelayClient {
       };
     } catch (err) {
       console.error("[relay] 连接失败:", err);
+      this.setConnectionState({ phase: "reconnecting", message: "中继连接失败，等待重连" });
       this.scheduleReconnect();
     }
   }
@@ -340,6 +479,10 @@ export class DeviceRelayClient {
         void this.handleRpcRequest(msg);
         break;
 
+      case "rpc_cancel":
+        void this.handleRpcCancel(msg);
+        break;
+
       case "rpc_response": {
         const pending = this.pendingRpc.get(msg.requestId);
         if (pending) {
@@ -370,6 +513,10 @@ export class DeviceRelayClient {
         }
         break;
       }
+
+      case "dns-monitor-event":
+        this.eventCallbacks.dns_monitor_event.forEach((cb) => cb(msg));
+        break;
     }
   }
 
@@ -386,14 +533,34 @@ export class DeviceRelayClient {
       return;
     }
 
+    const abortController = new AbortController();
+    const context = { requestId, fromDeviceId, signal: abortController.signal };
+    this.activeIncomingRpc.set(requestId, { command, params, context, abortController });
     try {
-      const data = await handler(params, { requestId, fromDeviceId });
+      const data = await handler(params, context);
       this.sendRpcResponse(requestId, true, data, null);
     } catch (err) {
       this.sendRpcResponse(requestId, false, null, {
         code: "EXEC_FAILED",
         message: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      this.activeIncomingRpc.delete(requestId);
+    }
+  }
+
+  private async handleRpcCancel(msg: IncomingMessage & { type: "rpc_cancel" }): Promise<void> {
+    const active = this.activeIncomingRpc.get(msg.requestId);
+    active?.abortController.abort(new DOMException("测速已强制停止", "AbortError"));
+    const runId = msg.runId
+      ?? (active?.params as { runId?: string } | null)?.runId;
+    if (runId && active?.command !== "e2e_setup" && msg.command !== "e2e_setup") {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("cancel_full_chain_test", { runId }).catch(() => undefined);
+    }
+    if (active && (active.command === "e2e_setup" || msg.command === "e2e_setup")) {
+      const cleanup = this.commandHandlers.get("e2e_cleanup");
+      if (cleanup) await cleanup({ runId }, active.context).catch(() => undefined);
     }
   }
 
@@ -413,22 +580,27 @@ export class DeviceRelayClient {
     }
   }
 
-  private startHeartbeat(): void {
+  private startHeartbeat(ws: WebSocket): void {
     this.stopHeartbeat();
+    this.sendHeartbeat(ws);
     this.heartbeatTimer = setInterval(() => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      // 60 秒未收到 pong 判定连接异常，主动关闭触发重连
+      if (!isCurrentSocket(this.ws, ws) || ws.readyState !== WebSocket.OPEN) return;
       if (Date.now() - this.lastPongAt > HEARTBEAT_TIMEOUT_MS) {
         console.warn("[relay] 心跳超时，主动断开重连");
-        this.ws.close();
+        ws.close();
         return;
       }
-      try {
-        this.ws.send(JSON.stringify({ type: "ping" }));
-      } catch {
-        // ignore
-      }
+      this.sendHeartbeat(ws);
     }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private sendHeartbeat(ws: WebSocket): void {
+    if (!isCurrentSocket(this.ws, ws) || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ type: "ping" }));
+    } catch {
+      ws.close();
+    }
   }
 
   private stopHeartbeat(): void {
@@ -440,6 +612,7 @@ export class DeviceRelayClient {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
+    this.setConnectionState({ phase: "reconnecting", message: "等待重新连接中继" });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (!this.isManualDisconnect) {
@@ -473,6 +646,11 @@ export class DeviceRelayClient {
   private setConnected(connected: boolean): void {
     this.connected = connected;
     this.connectionCallbacks.forEach((cb) => cb(connected));
+  }
+
+  private setConnectionState(next: Partial<RelayConnectionState>): void {
+    this.connectionState = { ...this.connectionState, ...next };
+    this.connectionStateCallbacks.forEach((callback) => callback(this.getConnectionState()));
   }
 }
 

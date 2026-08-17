@@ -45,9 +45,16 @@ import { ddnsService, type ChmlfrpAvailableDomain } from "@/services/ddnsService
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useSslProgress } from "./SslProgressContext";
 import { reportUsage } from "@/services/backendApi";
+import { getStoredUser } from "@/services/api";
 
 interface SslManagementProps {
   user?: StoredUser | null;
+}
+
+/** 已登录时上报事件，失败静默处理 */
+function reportUsageIfLoggedIn(eventType: string, eventData?: Record<string, unknown>): void {
+  if (!getStoredUser()?.accessToken) return;
+  reportUsage({ eventType, eventData }).catch(() => {});
 }
 
 /** 证书状态徽章 */
@@ -284,7 +291,7 @@ export function SslManagement({ user }: SslManagementProps) {
                       e.stopPropagation();
                       const ok = await confirm({
                         title: "删除证书",
-                        description: `确认删除证书「${cert.domains}」？此操作不可恢复。`,
+                        description: `确认删除证书「${cert.domains}」？此操作不可恢复。为避免滥用证书，删除证书将会扣除 1000 积分。`,
                         confirmText: "删除",
                         variant: "destructive",
                       });
@@ -292,6 +299,10 @@ export function SslManagement({ user }: SslManagementProps) {
                       try {
                         await sslService.delete(cert.id);
                         toast.success("证书已删除");
+                        reportUsageIfLoggedIn("ssl_certificate_delete", {
+                          provider: cert.provider,
+                          status: cert.status,
+                        });
                         load();
                       } catch (err) {
                         toast.error(err instanceof Error ? err.message : "删除失败");
@@ -316,8 +327,13 @@ export function SslManagement({ user }: SslManagementProps) {
             if (!user?.username) return;
             setShowRequest(false);
             // SSL 证书申请提交埋点：仅在用户已登录时上报，失败静默不影响主流程
+            // 同时兼容旧事件 ssl_request 与新事件 ssl_request_open
             if (user?.accessToken) {
               reportUsage({ eventType: "ssl_request" }).catch(() => {});
+              reportUsageIfLoggedIn("ssl_request_open", {
+                provider: params.provider,
+                domain_count: params.domains.length,
+              });
             }
             // 交给全局 Provider 托管进度状态与浮动卡片渲染
             await startRequest(params, user);
@@ -747,6 +763,12 @@ function DetailDialog({
       const updated = await sslService.verify(detail.id);
       setDetail(updated);
       toast.success("验证请求已发送");
+      // 仅上报"开始验证"：verify API 成功返回 = 验证请求已被服务端接受
+      // 最终验证结果通过 ssl_request_success/failure 体现，此处不上报 validation_success/failure
+      reportUsageIfLoggedIn("ssl_validation_start", {
+        provider: detail.provider,
+        status: detail.status,
+      });
       onRefresh();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "验证失败");
@@ -758,7 +780,7 @@ function DetailDialog({
   const handleDelete = async () => {
     const ok = await confirm({
       title: "删除证书",
-      description: `确认删除证书「${detail.domains}」？此操作不可恢复。`,
+      description: `确认删除证书「${detail.domains}」？此操作不可恢复。为避免滥用证书，删除证书将会扣除 1000 积分。`,
       confirmText: "删除",
       variant: "destructive",
     });
@@ -767,6 +789,10 @@ function DetailDialog({
     try {
       await sslService.delete(detail.id);
       toast.success("证书已删除");
+      reportUsageIfLoggedIn("ssl_certificate_delete", {
+        provider: detail.provider,
+        status: detail.status,
+      });
       onRefresh();
       onClose();
     } catch (e) {

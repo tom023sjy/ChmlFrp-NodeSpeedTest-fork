@@ -157,13 +157,17 @@ fn credential_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DnsCredentia
 }
 
 /// 凭证查询字段列表（与 credential_from_row 保持一致）
-const CREDENTIAL_COLUMNS: &str = "id, name, provider, secret_id, secret_key, token, api_token, owner_username";
+const CREDENTIAL_COLUMNS: &str =
+    "id, name, provider, secret_id, secret_key, token, api_token, owner_username";
 
 /// 读取所有凭证（调度器内部使用，不限用户）
 pub fn list_all_credentials(_app_handle: &tauri::AppHandle) -> Result<Vec<DnsCredential>, String> {
     let conn = db::get_conn()?;
     let mut stmt = conn
-        .prepare(&format!("SELECT {} FROM dns_credentials", CREDENTIAL_COLUMNS))
+        .prepare(&format!(
+            "SELECT {} FROM dns_credentials",
+            CREDENTIAL_COLUMNS
+        ))
         .map_err(|e| format!("查询凭证失败: {}", e))?;
     let rows = stmt
         .query_map([], credential_from_row)
@@ -196,10 +200,16 @@ pub fn list_all_tasks(_app_handle: &tauri::AppHandle) -> Result<Vec<DnsMonitorTa
 }
 
 /// 按 ID 读取单个任务（调度器内部使用）
-pub fn get_task_by_id(_app_handle: &tauri::AppHandle, task_id: &str) -> Result<Option<DnsMonitorTask>, String> {
+pub fn get_task_by_id(
+    _app_handle: &tauri::AppHandle,
+    task_id: &str,
+) -> Result<Option<DnsMonitorTask>, String> {
     let conn = db::get_conn()?;
     let mut stmt = conn
-        .prepare(&format!("SELECT {} FROM dns_tasks WHERE id = ?", TASK_COLUMNS))
+        .prepare(&format!(
+            "SELECT {} FROM dns_tasks WHERE id = ?",
+            TASK_COLUMNS
+        ))
         .map_err(|e| format!("查询任务失败: {}", e))?;
     let mut rows = stmt
         .query_map([&task_id], task_from_row)
@@ -342,10 +352,12 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DnsMonitorTask> {
         credential_id: row.get("credential_id")?,
         domain: row.get("domain")?,
         subdomain: row.get("subdomain")?,
-        primary_tunnel: serde_json::from_str(&primary_tunnel_str).unwrap_or_else(|_| TunnelTarget {
-            tunnel_name: String::new(),
-            cname_value: String::new(),
-            note: String::new(),
+        primary_tunnel: serde_json::from_str(&primary_tunnel_str).unwrap_or_else(|_| {
+            TunnelTarget {
+                tunnel_name: String::new(),
+                cname_value: String::new(),
+                note: String::new(),
+            }
         }),
         backup_tunnels: serde_json::from_str(&backup_tunnels_str).unwrap_or_default(),
         fail_threshold: row.get("fail_threshold")?,
@@ -530,17 +542,11 @@ pub async fn list_dns_logs(
 }
 
 #[tauri::command]
-pub async fn clear_dns_logs(
-    _app_handle: tauri::AppHandle,
-    username: String,
-) -> Result<(), String> {
+pub async fn clear_dns_logs(_app_handle: tauri::AppHandle, username: String) -> Result<(), String> {
     let conn = db::get_conn()?;
     // 仅清空当前用户的日志，保留其他用户的日志
-    conn.execute(
-        "DELETE FROM dns_logs WHERE owner_username = ?",
-        [&username],
-    )
-    .map_err(|e| format!("清空日志失败: {}", e))?;
+    conn.execute("DELETE FROM dns_logs WHERE owner_username = ?", [&username])
+        .map_err(|e| format!("清空日志失败: {}", e))?;
     Ok(())
 }
 
@@ -587,7 +593,10 @@ fn append_log_inner(log: &DnsSwitchLog) -> Result<(), String> {
 /// 内部接口：生成简易 ID（时间戳 + 随机后缀）
 pub fn gen_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     format!("{:x}", nanos)
 }
 
@@ -648,16 +657,16 @@ pub async fn list_dns_runtime(
         }
         list
     };
-    let guard = state.0.lock().map_err(|e| format!("获取运行时锁失败: {}", e))?;
+    let guard = state
+        .0
+        .lock()
+        .map_err(|e| format!("获取运行时锁失败: {}", e))?;
     let mut result = std::collections::HashMap::new();
     for task in tasks {
-        let rt = guard
-            .get(&task.id)
-            .cloned()
-            .unwrap_or_else(|| TaskRuntime {
-                active_tunnel_name: task.primary_tunnel.tunnel_name.clone(),
-                ..Default::default()
-            });
+        let rt = guard.get(&task.id).cloned().unwrap_or_else(|| TaskRuntime {
+            active_tunnel_name: task.primary_tunnel.tunnel_name.clone(),
+            ..Default::default()
+        });
         result.insert(task.id, rt);
     }
     Ok(result)
@@ -700,7 +709,11 @@ pub async fn dns_list_all_txt_records(
         .collect::<Vec<_>>();
 
     for cred in &creds {
-        let label = format!("{}（{}）", cred.name, super::dns_provider::provider_label(cred.provider));
+        let label = format!(
+            "{}（{}）",
+            cred.name,
+            super::dns_provider::provider_label(cred.provider)
+        );
         // 列出该凭证下所有主域名
         let domains = match super::dns_provider::list_domains(cred).await {
             Ok(d) => d,
@@ -753,7 +766,9 @@ pub async fn dns_list_all_txt_records(
         let label = "ChmlFrp 免费域名（当前登录账户）".to_string();
         if let Ok(domains) = super::dns_provider::list_domains(&chmlfrp_cred).await {
             for domain in domains {
-                if let Ok(records) = super::dns_provider::list_records(&chmlfrp_cred, &domain, None).await {
+                if let Ok(records) =
+                    super::dns_provider::list_records(&chmlfrp_cred, &domain, None).await
+                {
                     for rec in records {
                         if rec.record_type.eq_ignore_ascii_case("TXT") {
                             items.push(TxtRecordItem {
@@ -788,7 +803,9 @@ pub async fn dns_delete_txt_record(
     if credential_id == "__chmlfrp__" {
         let access_token = {
             let guard = state.0.lock().map_err(|e| format!("锁错误: {}", e))?;
-            guard.clone().ok_or_else(|| "未登录或登录已过期".to_string())?
+            guard
+                .clone()
+                .ok_or_else(|| "未登录或登录已过期".to_string())?
         };
         let cred = super::dns_provider::DnsCredential {
             id: String::new(),
@@ -806,7 +823,9 @@ pub async fn dns_delete_txt_record(
     // 查找用户凭证（账号隔离校验）
     let cred = list_all_credentials(&app_handle)?
         .into_iter()
-        .find(|c| c.id == credential_id && (c.owner_username.is_empty() || c.owner_username == username))
+        .find(|c| {
+            c.id == credential_id && (c.owner_username.is_empty() || c.owner_username == username)
+        })
         .ok_or_else(|| format!("未找到凭证: {}", credential_id))?;
     super::dns_provider::delete_record(&cred, &domain, &record_id).await
 }

@@ -5,9 +5,9 @@ mod migration;
 mod models;
 mod utils;
 
+use commands::ddns_monitor;
 use commands::dns_config::{DnsRuntimeState, UserTokenState};
 use commands::dns_monitor;
-use commands::ddns_monitor;
 use commands::update::{launch_installer_silent, take_pending_installer, PendingInstaller};
 use models::FrpcProcesses;
 use tauri::{
@@ -41,6 +41,32 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // 日志插件全模式初始化：终端 + 数据目录 logs 文件，确保缓存失败等问题可事后排查
+            // 目录不可写（如受限环境）时退化为仅终端输出，不影响应用启动
+            let log_targets: Vec<tauri_plugin_log::Target> = {
+                let mut targets = vec![tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                )];
+                if let Ok(data_dir) = app.path().app_data_dir() {
+                    let logs_dir = data_dir.join("logs");
+                    if std::fs::create_dir_all(&logs_dir).is_ok() {
+                        targets.push(tauri_plugin_log::Target::new(
+                            tauri_plugin_log::TargetKind::Folder {
+                                path: logs_dir,
+                                file_name: None,
+                            },
+                        ));
+                    }
+                }
+                targets
+            };
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .targets(log_targets)
+                    .build(),
+            )?;
+
             // 初始化 SQLite 数据库（替代 JSON 文件存储）
             if let Err(e) = db::init(app.handle()) {
                 log::error!("数据库初始化失败: {}", e);
@@ -67,14 +93,6 @@ pub fn run() {
                 }
             }
 
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
-
             // 创建系统托盘图标及菜单
             let show_item = MenuItem::with_id(app, "tray-show", "显示主窗口", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "tray-quit", "退出程序", true, None::<&str>)?;
@@ -83,20 +101,18 @@ pub fn run() {
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .tooltip("ChmlFrp社区工具箱")
                 .menu(&menu)
-                .on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "tray-show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = window.unminimize();
-                            }
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "tray-show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            let _ = window.unminimize();
                         }
-                        "tray-quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
                     }
+                    "tray-quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     // 左键单击托盘图标时显示主窗口
@@ -132,12 +148,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::http_request,
             commands::http_request_raw,
+            commands::get_issue_attachment_cache_path,
+            commands::cache_issue_attachment,
+            commands::clear_issue_attachment_cache,
             commands::tcping_host,
             commands::ping_host,
             commands::start_tcp_speed_server,
             commands::stop_tcp_speed_server,
             commands::check_tcp_speed_server,
             commands::tcp_speed_test,
+            commands::tunnel_latency_test,
+            commands::cancel_full_chain_test,
             commands::copy_background_image,
             commands::copy_background_video,
             commands::get_background_video_path,

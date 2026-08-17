@@ -13,7 +13,6 @@
  * - ssl_logs: SSL 证书申请日志
  * - secure_storage: 安全存储（登录 token 等敏感数据，加密存储）
  */
-
 use once_cell::sync::OnceCell;
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -37,8 +36,7 @@ pub fn init(app_handle: &tauri::AppHandle) -> Result<(), String> {
     let db_path = app_data.join(DB_FILE_NAME);
     log::info!("数据库已初始化: {}", DB_FILE_NAME);
 
-    let conn = Connection::open(&db_path)
-        .map_err(|e| format!("打开数据库失败: {}", e))?;
+    let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {}", e))?;
 
     // 启用 WAL 模式提升并发读性能
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
@@ -171,5 +169,3 @@ pub fn get_conn() -> Result<std::sync::MutexGuard<'static, Connection>, String> 
         .lock()
         .map_err(|e| format!("获取数据库锁失败: {}", e))
 }
-
-

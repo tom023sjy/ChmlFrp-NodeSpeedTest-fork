@@ -23,10 +23,7 @@ import { tunnelService, type TempTunnelInfo } from "./tunnelService";
 import { getStoredUser } from "./api";
 import { getRelayClient, type RpcProgress } from "./deviceRelay";
 import { isDefenderBlockedError } from "./speedTestService";
-import type {
-  TcpSpeedTestResult,
-  TcpingResult,
-} from "./relayHandlers";
+import type { TcpSpeedTestResult, TcpingResult } from "./relayHandlers";
 
 /** 端对端测试方向 */
 export type E2EDirection = "to_local" | "to_remote";
@@ -75,12 +72,15 @@ export interface E2ETestOptions {
   testLatency: boolean;
   /** 是否测试带宽 */
   testSpeed: boolean;
-  /** 测速数据量（MB） */
-  sizeMb?: number;
+  /** 测速时长（秒） */
+  durationSeconds?: number;
   /** 进度回调 */
   onProgress?: (p: E2EProgress) => void;
   /** 日志回调 */
-  onLog?: (msg: string, level?: "info" | "success" | "warning" | "error") => void;
+  onLog?: (
+    msg: string,
+    level?: "info" | "success" | "warning" | "error",
+  ) => void;
 }
 
 /** 单个节点的批量测试结果 */
@@ -117,12 +117,21 @@ export class E2ETestAbortController {
   private aborted = false;
   private forceAborted = false;
   /** 软停止：当前节点完成后停止后续节点 */
-  abort() { this.aborted = true; }
+  abort() {
+    this.aborted = true;
+  }
   /** 取消软停止：恢复测试继续执行 */
-  reset() { this.aborted = false; }
+  reset() {
+    this.aborted = false;
+  }
   /** 强制停止：立即中断当前节点 */
-  forceAbort() { this.forceAborted = true; this.aborted = true; }
-  get signal() { return { aborted: this.aborted, forceAborted: this.forceAborted }; }
+  forceAbort() {
+    this.forceAborted = true;
+    this.aborted = true;
+  }
+  get signal() {
+    return { aborted: this.aborted, forceAborted: this.forceAborted };
+  }
 }
 
 export class E2ETestService {
@@ -162,9 +171,10 @@ export class E2ETestService {
     const { direction, targetDeviceId, targetDeviceName, nodeName } = options;
     this.abortController = new E2ETestAbortController();
 
-    const directionLabel = direction === "to_local"
-      ? `${targetDeviceName} → 本机`
-      : `本机 → ${targetDeviceName}`;
+    const directionLabel =
+      direction === "to_local"
+        ? `${targetDeviceName} → 本机`
+        : `本机 → ${targetDeviceName}`;
 
     const baseResult: E2ETestResult = {
       latencyMs: null,
@@ -184,7 +194,9 @@ export class E2ETestService {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      const errorType = isDefenderBlockedError(msg) ? "defender_blocked" as const : "generic" as const;
+      const errorType = isDefenderBlockedError(msg)
+        ? ("defender_blocked" as const)
+        : ("generic" as const);
       return { ...baseResult, error: msg, errorType };
     } finally {
       await this.cleanup(options.onLog);
@@ -199,19 +211,32 @@ export class E2ETestService {
     options: E2ETestOptions,
     baseResult: E2ETestResult,
   ): Promise<E2ETestResult> {
-    const { onProgress, onLog, testLatency, testSpeed, sizeMb, targetDeviceId } = options;
+    const {
+      onProgress,
+      onLog,
+      testLatency,
+      testSpeed,
+      durationSeconds = 15,
+      targetDeviceId,
+    } = options;
     const log = onLog ?? (() => {});
     const progress = onProgress ?? (() => {});
 
     // 1. 启动 TCP 测速服务端
-    progress({ stage: "starting_server", progress: 5, message: "正在启动测速服务端..." });
+    progress({
+      stage: "starting_server",
+      progress: 5,
+      message: "正在启动测速服务端...",
+    });
     log("正在启动 TCP 测速服务端...", "info");
 
     await invoke("stop_tcp_speed_server");
     const tcpServerPort = await invoke<number>("start_tcp_speed_server");
     log(`TCP 测速服务端已启动，端口: ${tcpServerPort}`, "success");
 
-    const serverOk = await invoke<boolean>("check_tcp_speed_server", { port: tcpServerPort });
+    const serverOk = await invoke<boolean>("check_tcp_speed_server", {
+      port: tcpServerPort,
+    });
     if (!serverOk) {
       throw new Error("TCP 测速服务端自检失败");
     }
@@ -221,17 +246,31 @@ export class E2ETestService {
     if (this.abortController?.signal.aborted) throw new Error("测试已取消");
 
     // 2. 创建临时隧道
-    progress({ stage: "creating_tunnel", progress: 15, message: "正在创建临时隧道..." });
+    progress({
+      stage: "creating_tunnel",
+      progress: 15,
+      message: "正在创建临时隧道...",
+    });
     log(`正在创建临时隧道（节点: ${options.nodeName}）...`, "info");
 
-    this.tunnelInfo = await tunnelService.createTempTunnel(tcpServerPort, options.nodeName);
-    log(`隧道创建成功: ${this.tunnelInfo.nodeIp}:${this.tunnelInfo.remotePort}`, "success");
+    this.tunnelInfo = await tunnelService.createTempTunnel(
+      tcpServerPort,
+      options.nodeName,
+    );
+    log(
+      `隧道创建成功: ${this.tunnelInfo.nodeIp}:${this.tunnelInfo.remotePort}`,
+      "success",
+    );
 
     if (this.isForceAborted) throw new Error("测试已强制停止");
     if (this.abortController?.signal.aborted) throw new Error("测试已取消");
 
     // 3. 启动 frpc
-    progress({ stage: "starting_frpc", progress: 25, message: "正在启动 frpc 客户端..." });
+    progress({
+      stage: "starting_frpc",
+      progress: 25,
+      message: "正在启动 frpc 客户端...",
+    });
     log("正在启动 frpc...", "info");
 
     const user = getStoredUser();
@@ -265,8 +304,15 @@ export class E2ETestService {
 
     // 4. 延迟测试：让对端 tcping 本机隧道地址
     if (testLatency) {
-      progress({ stage: "testing_latency", progress: 35, message: `正在测试延迟（${options.targetDeviceName} → 本机）...` });
-      log(`正在通过 relay 让 ${options.targetDeviceName} 执行 tcping...`, "info");
+      progress({
+        stage: "testing_latency",
+        progress: 35,
+        message: `正在测试延迟（${options.targetDeviceName} → 本机）...`,
+      });
+      log(
+        `正在通过 relay 让 ${options.targetDeviceName} 执行 tcping...`,
+        "info",
+      );
 
       const tcpingResp = await getRelayClient().sendRpc<TcpingResult>(
         targetDeviceId,
@@ -279,7 +325,10 @@ export class E2ETestService {
         latencyMs = Math.round(tcpingResp.data.avg * 100) / 100;
         log(`延迟: ${latencyMs}ms`, "success");
       } else {
-        log(`延迟测试失败: ${tcpingResp.error?.message ?? "未知错误"}`, "warning");
+        log(
+          `延迟测试失败: ${tcpingResp.error?.message ?? "未知错误"}`,
+          "warning",
+        );
       }
     }
 
@@ -288,15 +337,22 @@ export class E2ETestService {
 
     // 5. 带宽测试：让对端 tcp_speed_test 本机隧道地址
     if (testSpeed) {
-      progress({ stage: "testing_speed", progress: 50, message: `正在测试带宽（${options.targetDeviceName} → 本机）...` });
-      log(`正在通过 relay 让 ${options.targetDeviceName} 执行带宽测试...`, "info");
+      progress({
+        stage: "testing_speed",
+        progress: 50,
+        message: `正在测试带宽（${options.targetDeviceName} → 本机）...`,
+      });
+      log(
+        `正在通过 relay 让 ${options.targetDeviceName} 执行带宽测试...`,
+        "info",
+      );
 
       const speedResp = await getRelayClient().sendRpc<TcpSpeedTestResult>(
         targetDeviceId,
         "tcp_speed_test",
-        { host: tunnelHost, port: tunnelPort, sizeMb: sizeMb ?? 10 },
+        { host: tunnelHost, port: tunnelPort, durationSeconds },
         {
-          timeoutMs: 120000,
+          timeoutMs: (durationSeconds + 30) * 1_000,
           onProgress: (p: RpcProgress) => {
             const pct = 50 + (p.progress / 100) * 45;
             progress({
@@ -313,7 +369,10 @@ export class E2ETestService {
         speedMbps = Math.round(speedResp.data.speedMbps * 100) / 100;
         log(`带宽: ${speedMbps} Mbps`, "success");
       } else {
-        log(`带宽测试失败: ${speedResp.error?.message ?? speedResp.data?.error ?? "未知错误"}`, "warning");
+        log(
+          `带宽测试失败: ${speedResp.error?.message ?? speedResp.data?.error ?? "未知错误"}`,
+          "warning",
+        );
       }
     }
 
@@ -336,21 +395,40 @@ export class E2ETestService {
     options: E2ETestOptions,
     baseResult: E2ETestResult,
   ): Promise<E2ETestResult> {
-    const { onProgress, onLog, testLatency, testSpeed, sizeMb, targetDeviceId, targetDeviceName } = options;
+    const {
+      onProgress,
+      onLog,
+      testLatency,
+      testSpeed,
+      durationSeconds = 15,
+      targetDeviceId,
+      targetDeviceName,
+    } = options;
     const log = onLog ?? (() => {});
     const progress = onProgress ?? (() => {});
 
     // 1. 通过 relay 让对端启动测速服务端 + 创建隧道 + 启动 frpc
-    progress({ stage: "remote_setup", progress: 10, message: `正在让 ${targetDeviceName} 准备测速环境...` });
+    progress({
+      stage: "remote_setup",
+      progress: 10,
+      message: `正在让 ${targetDeviceName} 准备测速环境...`,
+    });
     log(`正在通过 relay 让 ${targetDeviceName} 准备测速环境...`, "info");
 
     const setupResp = await getRelayClient().sendRpc<{
       nodeIp: string;
       remotePort: number;
-    }>(targetDeviceId, "e2e_setup", { nodeName: options.nodeName }, { timeoutMs: 60000 });
+    }>(
+      targetDeviceId,
+      "e2e_setup",
+      { nodeName: options.nodeName },
+      { timeoutMs: 60000 },
+    );
 
     if (!setupResp.success || !setupResp.data) {
-      throw new Error(`对端准备测速环境失败: ${setupResp.error?.message ?? "未知错误"}`);
+      throw new Error(
+        `对端准备测速环境失败: ${setupResp.error?.message ?? "未知错误"}`,
+      );
     }
 
     const tunnelHost = setupResp.data.nodeIp;
@@ -365,13 +443,18 @@ export class E2ETestService {
 
     // 2. 延迟测试：本机 tcping 对端隧道地址
     if (testLatency) {
-      progress({ stage: "testing_latency", progress: 35, message: `正在测试延迟（本机 → ${targetDeviceName}）...` });
+      progress({
+        stage: "testing_latency",
+        progress: 35,
+        message: `正在测试延迟（本机 → ${targetDeviceName}）...`,
+      });
       log(`正在执行 tcping ${tunnelHost}:${tunnelPort}...`, "info");
 
-      const tcpingResult = await invoke<{ success: boolean; latency: number | null; error: string | null }>(
-        "tcping_host",
-        { host: tunnelHost, port: tunnelPort, timeout: 3 },
-      );
+      const tcpingResult = await invoke<{
+        success: boolean;
+        latency: number | null;
+        error: string | null;
+      }>("tcping_host", { host: tunnelHost, port: tunnelPort, timeout: 3 });
 
       if (tcpingResult.success && tcpingResult.latency != null) {
         latencyMs = Math.round(tcpingResult.latency * 100) / 100;
@@ -386,7 +469,11 @@ export class E2ETestService {
 
     // 3. 带宽测试：本机 tcp_speed_test 对端隧道地址
     if (testSpeed) {
-      progress({ stage: "testing_speed", progress: 50, message: `正在测试带宽（本机 → ${targetDeviceName}）...` });
+      progress({
+        stage: "testing_speed",
+        progress: 50,
+        message: `正在测试带宽（本机 → ${targetDeviceName}）...`,
+      });
       log(`正在执行带宽测试 ${tunnelHost}:${tunnelPort}...`, "info");
 
       const speedResult = await invoke<{
@@ -398,7 +485,7 @@ export class E2ETestService {
       }>("tcp_speed_test", {
         host: tunnelHost,
         port: tunnelPort,
-        sizeMb: sizeMb ?? 10,
+        durationSeconds,
       });
 
       if (speedResult.success) {
@@ -410,8 +497,17 @@ export class E2ETestService {
     }
 
     // 4. 通知对端清理
-    progress({ stage: "remote_cleanup", progress: 95, message: "正在通知对端清理..." });
-    await getRelayClient().sendRpc(targetDeviceId, "e2e_cleanup", {}, { timeoutMs: 15000 });
+    progress({
+      stage: "remote_cleanup",
+      progress: 95,
+      message: "正在通知对端清理...",
+    });
+    await getRelayClient().sendRpc(
+      targetDeviceId,
+      "e2e_cleanup",
+      {},
+      { timeoutMs: 15000 },
+    );
 
     progress({ stage: "completed", progress: 100, message: "测试完成" });
 
@@ -478,7 +574,10 @@ export class E2ETestService {
             stage: p.message,
             overallPercent: Math.min(99, nodePct * 100),
             nodeProgress: p.progress,
-            nodeMessage: p.speedMbps != null ? `${p.speedMbps.toFixed(1)} Mbps` : undefined,
+            nodeMessage:
+              p.speedMbps != null
+                ? `${p.speedMbps.toFixed(1)} Mbps`
+                : undefined,
           });
         },
       });
@@ -498,14 +597,21 @@ export class E2ETestService {
 
         // 检测到 Windows Defender 拦截：立即停止整个测试流程
         if (result.errorType === "defender_blocked") {
-          log("检测到 Windows Defender 实时保护拦截，已自动停止测试", "warning");
+          log(
+            "检测到 Windows Defender 实时保护拦截，已自动停止测试",
+            "warning",
+          );
           this.abort();
           break;
         }
       } else {
         const latStr = result.latencyMs != null ? `${result.latencyMs}ms` : "-";
-        const spdStr = result.speedMbps != null ? `${result.speedMbps}Mbps` : "-";
-        log(`[${i + 1}/${total}] ${nodeName} 完成 - 延迟: ${latStr}, 带宽: ${spdStr}`, "success");
+        const spdStr =
+          result.speedMbps != null ? `${result.speedMbps}Mbps` : "-";
+        log(
+          `[${i + 1}/${total}] ${nodeName} 完成 - 延迟: ${latStr}, 带宽: ${spdStr}`,
+          "success",
+        );
       }
     }
 
@@ -530,7 +636,10 @@ export class E2ETestService {
 
   /** 清理本机资源 */
   private async cleanup(
-    onLog?: (msg: string, level?: "info" | "success" | "warning" | "error") => void,
+    onLog?: (
+      msg: string,
+      level?: "info" | "success" | "warning" | "error",
+    ) => void,
   ) {
     const log = onLog ?? (() => {});
     const errors: string[] = [];
@@ -541,7 +650,9 @@ export class E2ETestService {
         await invoke("stop_frpc");
         log("frpc 已停止", "info");
       } catch (e) {
-        errors.push(`停止 frpc 失败: ${e instanceof Error ? e.message : String(e)}`);
+        errors.push(
+          `停止 frpc 失败: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
       this.frpcStarted = false;
     }
@@ -552,7 +663,9 @@ export class E2ETestService {
         await tunnelService.deleteTempTunnel();
         log("临时隧道已删除", "info");
       } catch (e) {
-        errors.push(`删除隧道失败: ${e instanceof Error ? e.message : String(e)}`);
+        errors.push(
+          `删除隧道失败: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
       this.tunnelInfo = null;
     }
@@ -568,7 +681,9 @@ export class E2ETestService {
     try {
       await invoke("stop_tcp_speed_server");
     } catch (e) {
-      errors.push(`停止测速服务端失败: ${e instanceof Error ? e.message : String(e)}`);
+      errors.push(
+        `停止测速服务端失败: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
 
     if (errors.length > 0) {
