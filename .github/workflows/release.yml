@@ -37,14 +37,27 @@ jobs:
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+        # 直接使用 runner 预装的 rustup 安装工具链（官方源下载），
+        # 避免第三方 action 仓库被 codeload 间歇性限流（429）
+        shell: bash
+        run: |
+          rustup default stable
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            rustup target add aarch64-apple-darwin
+          fi
 
       - name: Rust cache
-        uses: swatinem/rust-cache@v2
+        # 使用官方 actions/cache 替代第三方缓存 action，避免同样的限流风险
+        uses: actions/cache@v4
         with:
-          workspaces: './src-tauri -> target'
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            src-tauri/target
+          key: rust-${{ matrix.platform }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ matrix.platform }}-
 
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'ubuntu-')
